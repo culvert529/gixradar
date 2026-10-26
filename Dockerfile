@@ -7,6 +7,8 @@ COPY app/build/static/css/gix-zones.css /app/build/static/css/gix-zones.css
 COPY app/build/static/js/gix-zones.js /app/build/static/js/gix-zones.js
 COPY app/zones/backend/app/services/analyzer.py /app/zones/backend/app/services/analyzer.py
 COPY app/zones/backend/app/services/training.py /app/zones/backend/app/services/training.py
+COPY app/zones/backend/app/services/collector.py /app/zones/backend/app/services/collector.py
+COPY app/zones/backend/app/services/pubg_api.py /app/zones/backend/app/services/pubg_api.py
 COPY app/zones/web/settings.js /app/zones/web/settings.js
 COPY app/zones/web/settings.css /app/zones/web/settings.css
 COPY app/zones/web/index.html /app/zones/web/index.html

@@ -3164,6 +3164,35 @@ diff --git a/app/zones/backend/app/services/analyzer.py b/app/zones/backend/app/
 +                "next_ready": loaded is not None and (map_id, phase, "next") in loaded.groups,
 +                "final_ready": loaded is not None and (map_id, phase, "final") in loaded.groups})
 +    return models, stages
+diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app/services/collector.py
+--- a/app/zones/backend/app/services/collector.py
++++ b/app/zones/backend/app/services/collector.py
+@@ -50,7 +50,7 @@
+     data=payload.get("data") if isinstance(payload,dict) else None
+     if not isinstance(data,(dict,list)):
+         raise AppError("PUBG_RESPONSE_INVALID","Official sample data is incomplete",502)
+-    result=[];seen=set();valid=isinstance(data,list) and not data
++    result=[];seen=set();valid=isinstance(data,list) and not data;nonempty_refs=False
+     for item in data if isinstance(data,list) else [data]:
+         if not isinstance(item,dict):
+             continue
+@@ -60,6 +60,7 @@
+         if not isinstance(refs,list):
+             continue
+         valid=True
++        nonempty_refs=nonempty_refs or bool(refs)
+         for ref in refs[:1000]:
+             value=ref.get("id") if isinstance(ref,dict) else None
+             try:
+@@ -70,7 +71,7 @@
+                 seen.add(value);result.append(value)
+             if len(result)>=1000:
+                 return result
+-    if not valid:
++    if not valid or nonempty_refs and not result:
+         raise AppError("PUBG_RESPONSE_INVALID","Official sample data is incomplete",502)
+     return result
+ 
 diff --git a/app/zones/backend/app/services/config_service.py b/app/zones/backend/app/services/config_service.py
 --- a/app/zones/backend/app/services/config_service.py
 +++ b/app/zones/backend/app/services/config_service.py
@@ -3472,6 +3501,18 @@ diff --git a/app/zones/backend/app/services/prediction.py b/app/zones/backend/ap
 +            item["observation_matches"] = sum(data.get(phase, {}).get("sample_count", 0)
 +                                              for data in profiles.values())
 +        return result
+diff --git a/app/zones/backend/app/services/pubg_api.py b/app/zones/backend/app/services/pubg_api.py
+--- a/app/zones/backend/app/services/pubg_api.py
++++ b/app/zones/backend/app/services/pubg_api.py
+@@ -25,7 +25,7 @@
+         return False
+ 
+ def path_segment(value: str) -> str:
+-    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,200}", value):
++    if not isinstance(value, str) or value in (".", "..") or not re.fullmatch(r"[A-Za-z0-9_.-]{1,200}", value):
+         raise AppError("INVALID_MATCH_REFERENCE", "Official match reference is invalid")
+     return value
+ 
 diff --git a/app/zones/backend/app/services/training.py b/app/zones/backend/app/services/training.py
 --- a/app/zones/backend/app/services/training.py
 +++ b/app/zones/backend/app/services/training.py

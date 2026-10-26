@@ -75,13 +75,13 @@ def verify_context(manifest_path, expected_release):
     need(manifest.get("source_release_sha256") == expected_release, "SOURCE_RELEASE_MISMATCH")
     installed, build = entries(manifest["files"]), entries(manifest["build_files"])
     revision = manifest.get("runtime_revision")
-    need(revision in {None, "cleanup1", "clock1", "profiles1", "settings1", "config1", "errors1", "accuracy1", "morse1", "morse3", "morse4"}, "UNSUPPORTED_RUNTIME_REVISION")
-    app_count = 997 if revision is None else (1007 if revision in {"morse1", "morse3", "morse4"} else 996)
+    need(revision in {None, "cleanup1", "clock1", "profiles1", "settings1", "config1", "errors1", "accuracy1", "morse1", "morse3", "morse4", "morse6"}, "UNSUPPORTED_RUNTIME_REVISION")
+    app_count = 997 if revision is None else (1007 if revision in {"morse1", "morse3", "morse4", "morse6"} else 996)
     need(len(installed) == app_count + 5 and len(build) == app_count + 31, "BASELINE_FILE_COUNTS")
     need(sum(n.startswith("app/") for n in installed) == app_count and
          sum(n.startswith("container/") for n in installed) == 5, "INSTALLED_ROOT_COUNTS")
     need(all(name in build and build[name] == item for name, item in installed.items()), "INSTALLED_NOT_IN_BUILD")
-    if revision in {"morse1", "morse3", "morse4"}:
+    if revision in {"morse1", "morse3", "morse4", "morse6"}:
         for rows in (manifest["files"], manifest["build_files"]):
             need([item["path"] for item in rows[-len(MORSE_ADDITIONS):]] == sorted(MORSE_ADDITIONS),
                  "MORSE_ADDITION_ORDER")
@@ -204,7 +204,7 @@ def verify_http(client, manifest, mode, assets=False):
         extra_keys = {"quality_policy"} if revision == "accuracy1" else set()
         if revision == "accuracy1":
             need(value.get("quality_policy") == "chronological-relative-knn-v1", "PREDICTION_QUALITY_POLICY")
-        if revision in {"morse1", "morse3", "morse4"}:
+        if revision in {"morse1", "morse3", "morse4", "morse6"}:
             extra_keys = {"model_match_type", "prediction_policy", "parameter_policy", "upstream_commit"}
             need(value.get("model_match_type") == "mixed" and
                  value.get("prediction_policy") == "morse-original-d4a93564" and
@@ -212,12 +212,12 @@ def verify_http(client, manifest, mode, assets=False):
                  value.get("upstream_commit") == MORSE_COMMIT, "PREDICTION_NATIVE_POLICY")
         need(set(value) == extra_keys | {"map_id", "current_phase", "next_circle", "final_circle", "model_run_id", "warnings",
                             "engine", "match_type", "geometry_policy"}, "PREDICTION_SCHEMA")
-        engine = "morse_zone_predictor" if revision in {"morse1", "morse3", "morse4"} else "pubg_circle_analyzer_knn"
-        geometry = "morse-original-v1" if revision in {"morse1", "morse3", "morse4"} else "nested-circles-v2"
+        engine = "morse_zone_predictor" if revision in {"morse1", "morse3", "morse4", "morse6"} else "pubg_circle_analyzer_knn"
+        geometry = "morse-original-v1" if revision in {"morse1", "morse3", "morse4", "morse6"} else "nested-circles-v2"
         need(value["map_id"] == map_id and value["engine"] == engine and
              value["geometry_policy"] == geometry and value["match_type"] == mode and
              all(value[k] is None for k in ("current_phase", "next_circle", "final_circle", "model_run_id")), "FRESH_PREDICTION")
-        warning = ("phase_or_match_type_unresolved" if mode == "auto" and revision not in {"morse1", "morse3", "morse4"}
+        warning = ("phase_or_match_type_unresolved" if mode == "auto" and revision not in {"morse1", "morse3", "morse4", "morse6"}
                    else "phase_unresolved_from_observed_radii")
         need(value["warnings"] == [warning], "FRESH_PREDICTION_WARNING")
     records = []
