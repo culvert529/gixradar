@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "version": "2.5.1-clock1",
+  "version": "2.5.1-clock2",
   "source_release_sha256": "d5732fecf94c06eae05c0221347a29c24cf9aeb9a1c864f4e3a382cdb0956014",
   "release_tag": "source-d5732fecf94c",
   "asset_name": "gixradar-image-context.zip",
