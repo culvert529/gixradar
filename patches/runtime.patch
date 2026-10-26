@@ -230,15 +230,78 @@ W)>t>X)kJr?*MlDQ^iIwB_xS_GOD(1V
 diff --git a/app/zones/backend/app/core/config.py b/app/zones/backend/app/core/config.py
 --- a/app/zones/backend/app/core/config.py
 +++ b/app/zones/backend/app/core/config.py
-@@ -16,8 +16,6 @@
+@@ -3,9 +3,11 @@
+ import json
+ import os
+ from pathlib import Path
++import re
+ import tempfile
+ from threading import RLock
+ from typing import Literal
++from uuid import uuid4
+ from pydantic import Field, PrivateAttr
+ from pydantic_settings import BaseSettings, SettingsConfigDict
+ from app.core.errors import AppError
+@@ -16,8 +18,7 @@
  
  class Settings(BaseSettings):
      _write_guard: RLock = PrivateAttr(default_factory=RLock)
 -    app_name: str = "GixRadar Circles"
 -    app_version: str = "2.0.0"
++    _key_revision: str | None = PrivateAttr(default=None)
      prediction_mode: Literal["auto", "normal", "competitive"] = "auto"
      config_dir: Path = Field(default=PROJECT_ROOT / "config", alias="APP_CONFIG_DIR")
      data_dir: Path = Field(default=DEFAULT_DATA_DIR, alias="APP_DATA_DIR")
+@@ -26,6 +27,11 @@
+     pubg_api_key: str | None = Field(default=None, alias="PUBG_API_KEY", repr=False)
+     pubg_api_timeout_seconds: int = Field(default=15, ge=1, le=30, alias="PUBG_API_TIMEOUT_SECONDS")
+     model_config = SettingsConfigDict(env_file=None, extra="ignore", populate_by_name=True)
++
++
++def valid_key_revision(value) -> bool:
++    return value is None or isinstance(value, str) and re.fullmatch(r"[a-f0-9]{32}", value) is not None
++
+ 
+ @lru_cache
+ def get_settings() -> Settings:
+@@ -38,6 +44,9 @@
+         key = stored["pubg_api_key"].strip()
+         if len(key) <= 4096 and all(32 <= ord(char) < 127 for char in key):
+             settings.pubg_api_key = key or None
++            revision = stored.get("key_revision")
++            if valid_key_revision(revision):
++                settings._key_revision = revision
+     if isinstance(stored, dict) and stored.get("prediction_mode") in ("auto", "normal", "competitive"):
+         settings.prediction_mode = stored["prediction_mode"]
+     return settings
+@@ -58,6 +67,10 @@
+         key = key.strip()
+         if len(key) > 4096 or any(not 32 <= ord(char) < 127 for char in key):
+             raise AppError("INVALID_SETTINGS", "PUBG API Key format is invalid")
++        revision = uuid4().hex if key != (settings.pubg_api_key or "") else settings._key_revision
++        document = {"pubg_api_key": key, "prediction_mode": mode}
++        if revision is not None:
++            document["key_revision"] = revision
+         with _settings_lock:
+             temporary = None
+             try:
+@@ -66,7 +79,7 @@
+                                                  prefix=".settings-", delete=False) as stream:
+                     temporary = Path(stream.name)
+                     os.chmod(temporary, 0o600)
+-                    json.dump({"pubg_api_key": key, "prediction_mode": mode}, stream)
++                    json.dump(document, stream)
+                     stream.write("\n"); stream.flush(); os.fsync(stream.fileno())
+                 os.replace(temporary, settings.data_dir / "settings.json")
+             except OSError as error:
+@@ -79,6 +92,7 @@
+                         pass
+         settings.pubg_api_key = key or None
+         settings.prediction_mode = mode
++        settings._key_revision = revision
+ 
+ 
+ def save_api_key(settings: Settings, key: str) -> None:
 diff --git a/app/zones/backend/app/db/connection.py b/app/zones/backend/app/db/connection.py
 --- a/app/zones/backend/app/db/connection.py
 +++ b/app/zones/backend/app/db/connection.py
@@ -3253,6 +3316,15 @@ diff --git a/app/zones/backend/app/services/analyzer.py b/app/zones/backend/app/
 diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app/services/collector.py
 --- a/app/zones/backend/app/services/collector.py
 +++ b/app/zones/backend/app/services/collector.py
+@@ -5,7 +5,7 @@
+ import json
+ import threading
+ import time
+-from app.core.config import Settings
++from app.core.config import Settings, valid_key_revision
+ from app.core.errors import AppError
+ from app.core.timestamps import parsed_time, timestamp
+ from app.db.connection import connect_database, database_connection
 @@ -50,7 +50,7 @@
      data=payload.get("data") if isinstance(payload,dict) else None
      if not isinstance(data,(dict,list)):
@@ -3279,7 +3351,42 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
          raise AppError("PUBG_RESPONSE_INVALID","Official sample data is incomplete",502)
      return result
  
-@@ -467,10 +468,12 @@
+@@ -84,6 +85,7 @@
+         self.last_result=empty_result();self.last_error_code=None;self.failures=0
+         self._scheduled_at=None;self._key_generation=0
+         self._key_marker=self._key_digest()
++        self._key_revision=settings._key_revision
+         with database_connection(settings.database_path) as connection:
+             self._seed_legacy(connection)
+             self._seed_retry_legacy(connection)
+@@ -113,6 +115,9 @@
+                 return  # Old two-field summaries remain readable.
+             if value.get("last_run_at") is not None and (stamp is None or stamp>self.clock()+60):
+                 return
++            revision=value.get("key_revision")
++            if not valid_key_revision(revision) or revision!=self._key_revision:
++                return
+             error=value.get("last_error_code");failures=value.get("failures");due=value.get("next_run_at")
+             if error is not None and (not isinstance(error,str) or error not in ERROR_CODES):
+                 return
+@@ -132,6 +137,8 @@
+         with self.guard:
+             value={"version":2,"last_run_at":self.last_run_at,"last_result":self.last_result,
+                    "last_error_code":self.last_error_code,"failures":self.failures,"next_run_at":self._scheduled_at}
++            if self._key_revision is not None:
++                value["key_revision"]=self._key_revision
+             try:
+                 with database_connection(self.settings.database_path) as connection:
+                     connection.execute("INSERT OR REPLACE INTO collector_state(key,value) VALUES('summary',?)",
+@@ -169,6 +176,7 @@
+             if marker==self._key_marker:
+                 return False
+             self._key_marker=marker;self._key_generation+=1
++            self._key_revision=self.settings._key_revision
+             client=self.client
+             self.next_run_at=self.clock() if self.settings.pubg_api_key else None
+             self._scheduled_at=self.next_run_at
+@@ -467,10 +475,12 @@
      def status(self):
          with self.guard:
              result={"enabled":True,"api_key_configured":bool(self.settings.pubg_api_key),"running":self.running,
@@ -4123,13 +4230,14 @@ diff --git a/app/zones/backend/app/services/training.py b/app/zones/backend/app/
 diff --git a/app/zones/web/index.html b/app/zones/web/index.html
 --- a/app/zones/web/index.html
 +++ b/app/zones/web/index.html
-@@ -1,9 +1,9 @@
+@@ -1,9 +1,10 @@
  <!doctype html>
 -<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=51aaa647d57f"><script defer src="/zones/settings.js?v=6b6d487fea36"></script></head>
-+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=c97345209f22"><script defer src="/zones/settings.js?v=94420ae537c9"></script></head>
++<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=c97345209f22"><script defer src="/zones/settings.js?v=ba2897c0d062"></script></head>
  <body><main>
  <p id="connection" class="muted" role="status">正在读取圈型预测状态…</p>
 -<section><h1>Circle Analyzer / KNN</h1><label for="prediction-mode">对局模式</label><select id="prediction-mode" disabled><option value="auto">自动</option><option value="normal">普通匹配</option><option value="competitive">竞技排位</option></select><p id="mode-message" role="status"></p><p class="muted">自动模式无法区分圈型时，可手动选择实际对局模式。</p></section>
++<button id="retry-connection" type="button" hidden>重新连接</button>
 +<section><h1>Morse 圈型预测</h1><label for="prediction-mode">阶段识别模式</label><select id="prediction-mode" disabled><option value="auto">自动</option><option value="normal">普通匹配</option><option value="competitive">竞技排位</option></select><p id="mode-message" role="status"></p><p class="muted">模式用于识别当前圈阶段；原版统计模型按地图训练，普通与竞技共用。不能确认阶段时暂不叠加。</p></section>
  <section><h2>官方 API Key</h2><p id="configured" class="muted">正在读取…</p><form id="key-form" hidden><label for="api-key">新的 PUBG API Key</label><input id="api-key" type="password" autocomplete="new-password" placeholder="仅在需要配置或更换时填写" maxlength="4096" required><button id="save-key" type="submit">保存 API Key</button><p id="message" role="status"></p></form><p class="muted">保存后自动更新圈样本；密钥不会回显。</p></section>
  <section><h2>自动采集与样本更新</h2><dl><dt>当前状态</dt><dd id="collector-state">—</dd><dt>采集计划</dt><dd id="interval">—</dd><dt>上次任务</dt><dd id="last-run">—</dd><dt>下次检查</dt><dd id="next-run">—</dd><dt>已收集比赛</dt><dd id="matches">—</dd><dt>圈型记录</dt><dd id="circles">—</dd></dl><p id="last-result" class="muted"></p><p id="task-error" class="error" role="status"></p><p class="muted">状态更新于 <span id="updated">—</span></p></section>
@@ -4149,7 +4257,60 @@ diff --git a/app/zones/web/settings.css b/app/zones/web/settings.css
 diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
 --- a/app/zones/web/settings.js
 +++ b/app/zones/web/settings.js
-@@ -77,23 +77,27 @@
+@@ -1,6 +1,7 @@
+ (function () {
+   'use strict';
+   const byId = id => document.getElementById(id);
++  const retryButton = byId('retry-connection');
+   const controllers = new Set();
+   let timer = null, active = true, authorized = false, saving = false, refreshing = false, refreshPending = false;
+   let initialized = false, initializing = false, initFailures = 0, predictionMode = 'auto';
+@@ -8,6 +9,7 @@
+   let writeEpoch = 0, readSequence = 0, appliedRead = 0, pendingMode = null, reconcileTimer = null, reconciling = false;
+   let resumePending = false, resuming = false;
+   let initialSettingsSynced = false;
++  let retryOffered = false, retrying = false;
+   const modes = { auto: '自动', normal: '普通匹配', competitive: '竞技排位' };
+   const text = (id, value) => { byId(id).textContent = value; };
+   const count = value => Number.isSafeInteger(value) && value >= 0 ? value.toLocaleString() : '—';
+@@ -28,6 +30,27 @@
+       return await response.json();
+     } finally { clearTimeout(timeout); controllers.delete(controller); }
+   }
++  function syncRetryControl() {
++    if (!retryButton) return;
++    retryButton.hidden = !retryOffered;
++    if (typeof retryButton.setAttribute === 'function') {
++      retryButton.setAttribute('aria-disabled', String(retrying));
++      retryButton.setAttribute('aria-busy', String(retrying));
++    }
++  }
++  function offerRetry() {
++    retryOffered = true; retrying = false; syncRetryControl();
++  }
++  function dismissRetry() {
++    const focused = retryOffered && retryButton && document.activeElement === retryButton;
++    retryOffered = false; retrying = false;
++    if (focused) {
++      const mode = byId('prediction-mode'), key = byId('api-key');
++      const target = !mode.disabled ? mode : !byId('key-form').hidden && !key.disabled ? key : null;
++      if (target && typeof target.focus === 'function') { try { target.focus(); } catch (_) {} }
++    }
++    syncRetryControl();
++  }
+   function postParent(data) {
+     if (!window.parent || window.parent === window || !window.location || typeof window.parent.postMessage !== 'function') return;
+     window.parent.postMessage(data, window.location.origin);
+@@ -36,7 +59,7 @@
+     clearTimeout(authTimer);
+     if (!active || document.hidden) return;
+     if (!completionHint && authAttempts >= 5) {
+-      text('connection', '会话尚未恢复，请确认雷达已连接；切回页面或重新打开可继续核对。'); return;
++      text('connection', '会话尚未恢复，请确认雷达已连接；切回页面或重新打开可继续核对。'); offerRetry(); return;
+     }
+     const requestId = authRequestId;
+     authTimer = setTimeout(() => {
+@@ -77,23 +100,27 @@
    async function resumeWhenReady() {
      if (!resumePending || !active || document.hidden || resuming || initializing || refreshing || saving || reconciling) return;
      resumePending = false; resuming = true;
@@ -4180,7 +4341,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
        drainRefresh();
      }
    }
-@@ -102,7 +106,12 @@
+@@ -102,7 +129,12 @@
    }
    async function readSettings(version, notify = false) {
      const sequence = ++readSequence;
@@ -4194,7 +4355,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
      if (!active || version !== writeEpoch || sequence < appliedRead) return null;
      const changed = result.prediction_mode !== predictionMode;
      applySettings(result); appliedRead = sequence;
-@@ -163,22 +172,39 @@
+@@ -163,22 +195,39 @@
      text('last-result', `检查 ${count(result.checked)} · 新增 ${count(result.inserted)} · 跳过 ${count(result.skipped)} · 失败 ${count(result.failed)}`);
      text('updated', new Date().toLocaleTimeString());
      text('task-error', problem);
@@ -4243,7 +4404,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
    }
    function drainRefresh() {
      if (refreshPending && active && authorized && initialized && !document.hidden && !refreshing && !saving &&
-@@ -189,12 +215,12 @@
+@@ -189,16 +238,21 @@
      if (refreshing) { if (afterWrite) refreshPending = true; return; }
      if (saving && !afterWrite) { refreshPending = true; return; }
      refreshPending = false; refreshing = true; clearTimeout(timer);
@@ -4260,7 +4421,16 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
        if (error.status === 401 || error.status === 403) sessionRequired();
        else text('connection', '状态暂不可用，稍后自动刷新。');
      } finally { refreshing = false; drainRefresh(); if (!refreshing) schedule(); void resumeWhenReady(); }
-@@ -248,6 +274,7 @@
+   }
++  if (retryButton) retryButton.addEventListener('click', () => {
++    if (!retryOffered || retrying || !active || document.hidden || initializing || resuming ||
++        refreshing || saving || reconciling || resumePending) return;
++    retrying = true; syncRetryControl(); text('connection', '正在重新连接…'); requestResume();
++  });
+   byId('key-form').addEventListener('submit', async event => {
+     event.preventDefault();
+     if (!authorized || saving) return;
+@@ -248,6 +302,7 @@
      if (document.hidden) { resumePending = true; for (const controller of controllers) controller.abort(); }
      else requestResume();
    });
@@ -4268,3 +4438,35 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
    window.addEventListener('pagehide', () => {
      active = false; resumePending = true; clearTimeout(timer); clearTimeout(authTimer); clearTimeout(reconcileTimer);
      for (const controller of controllers) controller.abort();
+@@ -271,6 +326,7 @@
+   });
+   async function initialize({recovery = false} = {}) {
+     if (!active || document.hidden || initializing || initialized) return;
++    if (retryOffered) { retrying = true; syncRetryControl(); }
+     initializing = true; clearTimeout(timer);
+     try {
+       const session = await request('/session');
+@@ -284,6 +340,7 @@
+       initialized = true; initFailures = 0; authRequested = false; authAttempts = 0; clearTimeout(authTimer);
+       if (firstSync) { initialSettingsSynced = true; notifySettingsChanged(); }
+       byId('key-form').hidden = false; setSaving(saving);
++      dismissRetry();
+       if (pendingMode) {
+         if (settings.prediction_mode === pendingMode.mode) {
+           pendingMode = null; clearTimeout(reconcileTimer); text('mode-message', '已核对实际模式，保存已确认。');
+@@ -301,7 +358,7 @@
+       else if (++initFailures <= 5) {
+         text('connection', '服务暂不可用，稍后自动重试。');
+         timer = setTimeout(initialize, [1000, 3000, 10000, 30000, 30000][initFailures - 1]);
+-      } else text('connection', '服务仍不可用，请稍后重新打开。');
++      } else { text('connection', '服务仍不可用，请稍后重新打开。'); offerRetry(); }
+     } finally {
+       initializing = false;
+       const pending = authCompletionPending; authCompletionPending = 0;
+@@ -310,5 +367,5 @@
+       drainRefresh();
+     }
+   }
+-  void initialize();
++  syncRetryControl(); void initialize();
+ })();
