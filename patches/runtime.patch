@@ -3909,7 +3909,7 @@ diff --git a/app/zones/web/index.html b/app/zones/web/index.html
 @@ -1,9 +1,9 @@
  <!doctype html>
 -<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=51aaa647d57f"><script defer src="/zones/settings.js?v=6b6d487fea36"></script></head>
-+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=51aaa647d57f"><script defer src="/zones/settings.js?v=d929b80efc46"></script></head>
++<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=51aaa647d57f"><script defer src="/zones/settings.js?v=a937b2863f51"></script></head>
  <body><main>
  <p id="connection" class="muted" role="status">正在读取圈型预测状态…</p>
 -<section><h1>Circle Analyzer / KNN</h1><label for="prediction-mode">对局模式</label><select id="prediction-mode" disabled><option value="auto">自动</option><option value="normal">普通匹配</option><option value="competitive">竞技排位</option></select><p id="mode-message" role="status"></p><p class="muted">自动模式无法区分圈型时，可手动选择实际对局模式。</p></section>
@@ -3978,7 +3978,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
 -      name.textContent = `${mapNames[model.map_id]} · ${modes[model.match_type]}`;
 -      detail.textContent = `${count(model.sample_count)} 条圈样本 / ${count(model.training_match_count)} 场独立比赛 · ${model.validation_available ? '有独立验证' : '尚无独立验证'}`;
 +      name.textContent = `${mapNames[model.map_id]} · 原版混合模式`;
-+      detail.textContent = `${count(model.sample_count)} 条训练样本 / ${count(model.training_match_count)} 场独立比赛 · ${model.validation_available ? '有原版留出指标' : '暂无原版留出指标'}`;
++      detail.textContent = `${count(model.sample_count)} 条可用样本 / ${count(model.training_match_count)} 场训练比赛 / ${count(model.validation_match_count)} 场验证比赛 · ${model.validation_available ? '有原版留出指标' : '暂无原版留出指标'}`;
        item.append(name, detail); models.append(item);
      }
      if (!models.childElementCount) {
