@@ -8,6 +8,7 @@ COPY app/zones/backend/app/services/training.py /app/zones/backend/app/services/
 COPY app/zones/web/settings.js /app/zones/web/settings.js
 COPY app/zones/web/index.html /app/zones/web/index.html
 COPY app/zones/backend/app/services/config_service.py /app/zones/backend/app/services/config_service.py
+COPY app/zones/backend/app/db/connection.py /app/zones/backend/app/db/connection.py
 COPY source-manifest.json /opt/gixradar-build.json
 
 ARG VERSION=analyzer

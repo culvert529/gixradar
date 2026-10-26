@@ -1,6 +1,76 @@
+diff --git a/app/build/index.html b/app/build/index.html
+--- a/app/build/index.html
++++ b/app/build/index.html
+@@ -1 +1 @@
+-<!doctype html><html lang="en"><head><meta charset="utf-8"/><link rel="icon" href="/favicon.ico"/><meta name="theme-color" content="#0e0e0e"/><meta name="description" content="GixRadar"/><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="GixRadar"><link rel="apple-touch-icon" href="/radar.png"/><link rel="manifest" href="/manifest.json"/><title>GixRadar</title><style>body,html{background-color:#0e0e0e}</style><script defer="defer" src="/static/js/gix-zones.js?v=5a283b356158"></script><script defer="defer" src="/static/js/main.747f18dd.js?follow=1&amp;zones=8eb56aff71ac"></script><link href="/static/css/main.257cb343.css" rel="stylesheet"><link rel="stylesheet" href="/static/css/gix-zones.css?v=2a4d20b3abc1"></head><body><noscript>You need to enable JavaScript to run this app.</noscript><div id="root"></div><div id="hidden-box"></div></body></html>
+\ No newline at end of file
++<!doctype html><html lang="en"><head><meta charset="utf-8"/><link rel="icon" href="/favicon.ico"/><meta name="theme-color" content="#0e0e0e"/><meta name="description" content="GixRadar"/><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="GixRadar"><link rel="apple-touch-icon" href="/radar.png"/><link rel="manifest" href="/manifest.json"/><title>GixRadar</title><style>body,html{background-color:#0e0e0e}</style><script defer="defer" src="/static/js/gix-zones.js?v=536528988bf1"></script><script defer="defer" src="/static/js/main.747f18dd.js?follow=1&amp;zones=8eb56aff71ac"></script><link href="/static/css/main.257cb343.css" rel="stylesheet"><link rel="stylesheet" href="/static/css/gix-zones.css?v=2a4d20b3abc1"></head><body><noscript>You need to enable JavaScript to run this app.</noscript><div id="root"></div><div id="hidden-box"></div></body></html>
+\ No newline at end of file
+diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
+--- a/app/build/static/js/gix-zones.js
++++ b/app/build/static/js/gix-zones.js
+@@ -32,7 +32,10 @@
+   let autoRunning = false, autoPrediction = null, nextAutoAt = 0, lastAutoStarted = -Infinity;
+   let lastAutoSuccess = -Infinity, autoFailures = 0, autoBlocked = false;
+   let autoStatus = '等待雷达登录', autoPhase = null, lastDataAt = 0, staleTimer = null;
+-  const now = () => root.Date ? root.Date.now() : Date.now();
++  const wallNow = () => root.Date ? root.Date.now() : Date.now();
++  // Throttles, retries and stale-data checks must survive system clock changes.
++  const now = root.performance && typeof root.performance.now === 'function'
++    ? () => root.performance.now() : wallNow;
+   const later = (callback, delay) => root.setTimeout(callback, delay);
+   function emit() { for (const listener of listeners) { try { listener(); } catch (_) {} } }
+   function setPin(value) {
+@@ -204,7 +207,7 @@
+       const source = [result.next_circle, result.final_circle].some(value => value && value.source === 'analyzer_knn') ? 'analyzer_knn' : 'rule_baseline';
+       autoPrediction = safe.next || safe.final ? { owner: 'auto', revision: snapshot.revision, mapId: snapshot.mapId,
+         worldSize: snapshot.worldSize, result: safe, phase: result.current_phase, source,
+-        generatedAt: now() } : null;
++        generatedAt: wallNow() } : null;
+       prediction = autoPrediction;
+       lastAutoSuccess = now(); nextAutoAt = now() + 30000; autoFailures = 0;
+       autoStatus = prediction ? '自动预测 · Circle Analyzer / ' + (source === 'analyzer_knn' ? 'KNN' : '规则估计')
+diff --git a/app/zones/backend/app/core/config.py b/app/zones/backend/app/core/config.py
+--- a/app/zones/backend/app/core/config.py
++++ b/app/zones/backend/app/core/config.py
+@@ -16,8 +16,6 @@
+ 
+ class Settings(BaseSettings):
+     _write_guard: RLock = PrivateAttr(default_factory=RLock)
+-    app_name: str = "GixRadar Circles"
+-    app_version: str = "2.0.0"
+     prediction_mode: Literal["auto", "normal", "competitive"] = "auto"
+     config_dir: Path = Field(default=PROJECT_ROOT / "config", alias="APP_CONFIG_DIR")
+     data_dir: Path = Field(default=DEFAULT_DATA_DIR, alias="APP_DATA_DIR")
+diff --git a/app/zones/backend/app/db/connection.py b/app/zones/backend/app/db/connection.py
+--- a/app/zones/backend/app/db/connection.py
++++ b/app/zones/backend/app/db/connection.py
+@@ -18,11 +18,18 @@
+         resolved_path.parent.mkdir(parents=True, exist_ok=True)
+ 
+     connection = sqlite3.connect(resolved_path, check_same_thread=False)
+-    connection.row_factory = sqlite3.Row
+-    connection.execute("PRAGMA foreign_keys = ON")
+-    connection.execute("PRAGMA busy_timeout = 5000")
+-    if resolved_path != ":memory:":
+-        connection.execute("PRAGMA journal_mode = WAL")
++    try:
++        connection.row_factory = sqlite3.Row
++        connection.execute("PRAGMA foreign_keys = ON")
++        connection.execute("PRAGMA busy_timeout = 5000")
++        if resolved_path != ":memory:":
++            connection.execute("PRAGMA journal_mode = WAL")
++    except BaseException:
++        try:
++            connection.close()
++        except Exception:
++            pass  # Preserve the original initialization error.
++        raise
+     return connection
+ 
+ 
 diff --git a/app/zones/backend/app/db/repository.py b/app/zones/backend/app/db/repository.py
 deleted file mode 100644
-index 6aed0cf5d1158685b5c2a7a0d8aa02d8a44c208c..0000000000000000000000000000000000000000
 --- a/app/zones/backend/app/db/repository.py
 +++ /dev/null
 @@ -1,67 +0,0 @@
@@ -71,58 +141,10 @@ index 6aed0cf5d1158685b5c2a7a0d8aa02d8a44c208c..00000000000000000000000000000000
 -        placeholders = ", ".join("?" for _ in values)
 -        params = tuple(values.values())
 -        return columns, placeholders, params
-diff --git a/app/zones/backend/app/core/config.py b/app/zones/backend/app/core/config.py
-index 514f46898140ef0ed0bb332d966dc478c782bf7c..6add49caa260a169b37bd68adf887faaf3380ebd 100644
---- a/app/zones/backend/app/core/config.py
-+++ b/app/zones/backend/app/core/config.py
-@@ -16,8 +16,6 @@
- 
- class Settings(BaseSettings):
-     _write_guard: RLock = PrivateAttr(default_factory=RLock)
--    app_name: str = "GixRadar Circles"
--    app_version: str = "2.0.0"
-     prediction_mode: Literal["auto", "normal", "competitive"] = "auto"
-     config_dir: Path = Field(default=PROJECT_ROOT / "config", alias="APP_CONFIG_DIR")
-     data_dir: Path = Field(default=DEFAULT_DATA_DIR, alias="APP_DATA_DIR")
-diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
-index a0cf13bee1935ca7e3d7fdc0d18aec881c669d1b..04dd34fd7f0e699e76f9b435ba72ddd0a58d14ad 100644
---- a/app/build/static/js/gix-zones.js
-+++ b/app/build/static/js/gix-zones.js
-@@ -32,7 +32,10 @@
-   let autoRunning = false, autoPrediction = null, nextAutoAt = 0, lastAutoStarted = -Infinity;
-   let lastAutoSuccess = -Infinity, autoFailures = 0, autoBlocked = false;
-   let autoStatus = '等待雷达登录', autoPhase = null, lastDataAt = 0, staleTimer = null;
--  const now = () => root.Date ? root.Date.now() : Date.now();
-+  const wallNow = () => root.Date ? root.Date.now() : Date.now();
-+  // Throttles, retries and stale-data checks must survive system clock changes.
-+  const now = root.performance && typeof root.performance.now === 'function'
-+    ? () => root.performance.now() : wallNow;
-   const later = (callback, delay) => root.setTimeout(callback, delay);
-   function emit() { for (const listener of listeners) { try { listener(); } catch (_) {} } }
-   function setPin(value) {
-@@ -204,7 +207,7 @@
-       const source = [result.next_circle, result.final_circle].some(value => value && value.source === 'analyzer_knn') ? 'analyzer_knn' : 'rule_baseline';
-       autoPrediction = safe.next || safe.final ? { owner: 'auto', revision: snapshot.revision, mapId: snapshot.mapId,
-         worldSize: snapshot.worldSize, result: safe, phase: result.current_phase, source,
--        generatedAt: now() } : null;
-+        generatedAt: wallNow() } : null;
-       prediction = autoPrediction;
-       lastAutoSuccess = now(); nextAutoAt = now() + 30000; autoFailures = 0;
-       autoStatus = prediction ? '自动预测 · Circle Analyzer / ' + (source === 'analyzer_knn' ? 'KNN' : '规则估计')
-diff --git a/app/build/index.html b/app/build/index.html
-index 21a14f07569b465b9cc503e3fda7a50d8db5a738..ac0efa89b2b981e421ef02f83810d1a2d0b50768 100644
---- a/app/build/index.html
-+++ b/app/build/index.html
-@@ -1 +1 @@
--<!doctype html><html lang="en"><head><meta charset="utf-8"/><link rel="icon" href="/favicon.ico"/><meta name="theme-color" content="#0e0e0e"/><meta name="description" content="GixRadar"/><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="GixRadar"><link rel="apple-touch-icon" href="/radar.png"/><link rel="manifest" href="/manifest.json"/><title>GixRadar</title><style>body,html{background-color:#0e0e0e}</style><script defer="defer" src="/static/js/gix-zones.js?v=5a283b356158"></script><script defer="defer" src="/static/js/main.747f18dd.js?follow=1&amp;zones=8eb56aff71ac"></script><link href="/static/css/main.257cb343.css" rel="stylesheet"><link rel="stylesheet" href="/static/css/gix-zones.css?v=2a4d20b3abc1"></head><body><noscript>You need to enable JavaScript to run this app.</noscript><div id="root"></div><div id="hidden-box"></div></body></html>
-\ No newline at end of file
-+<!doctype html><html lang="en"><head><meta charset="utf-8"/><link rel="icon" href="/favicon.ico"/><meta name="theme-color" content="#0e0e0e"/><meta name="description" content="GixRadar"/><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="GixRadar"><link rel="apple-touch-icon" href="/radar.png"/><link rel="manifest" href="/manifest.json"/><title>GixRadar</title><style>body,html{background-color:#0e0e0e}</style><script defer="defer" src="/static/js/gix-zones.js?v=536528988bf1"></script><script defer="defer" src="/static/js/main.747f18dd.js?follow=1&amp;zones=8eb56aff71ac"></script><link href="/static/css/main.257cb343.css" rel="stylesheet"><link rel="stylesheet" href="/static/css/gix-zones.css?v=2a4d20b3abc1"></head><body><noscript>You need to enable JavaScript to run this app.</noscript><div id="root"></div><div id="hidden-box"></div></body></html>
-\ No newline at end of file
 diff --git a/app/zones/backend/app/services/analyzer.py b/app/zones/backend/app/services/analyzer.py
-index d68233c57d6d1b28590c575351f7c35decd88477..b1eccd5084a30fc4556532bbef5ea733fff52c60 100644
 --- a/app/zones/backend/app/services/analyzer.py
 +++ b/app/zones/backend/app/services/analyzer.py
-@@ -254,10 +254,17 @@ class Bundle:
+@@ -254,10 +254,17 @@
      payload: dict
      models: dict = field(default_factory=dict)
      lock: threading.RLock = field(default_factory=threading.RLock)
@@ -141,7 +163,7 @@ index d68233c57d6d1b28590c575351f7c35decd88477..b1eccd5084a30fc4556532bbef5ea733
  
      def regressors(self, key):
          with self.lock:
-@@ -378,9 +385,9 @@ def _load_bundle(reference, *, cache):
+@@ -378,9 +385,9 @@
      return bundle
  
  
@@ -153,75 +175,6 @@ index d68233c57d6d1b28590c575351f7c35decd88477..b1eccd5084a30fc4556532bbef5ea733
  
  
  def _summarize_bundle(bundle, map_id, mode):
-diff --git a/app/zones/backend/app/services/training.py b/app/zones/backend/app/services/training.py
-index 50d522195a2ae418d3444670b06ef568fa563e2c..4a7b6fcb3da1066dd58a0933d67938e3d382d623 100644
---- a/app/zones/backend/app/services/training.py
-+++ b/app/zones/backend/app/services/training.py
-@@ -169,7 +169,7 @@ class AnalyzerTrainer:
-             return None
-         state = self.connection.execute("SELECT * FROM analyzer_state WHERE map_id=? AND match_type=?",
-                                         (map_id, mode)).fetchone()
--        existing = load_bundle(self.connection, self.config, self.model_dir, map_id, mode)
-+        existing = load_bundle(self.connection, self.config, self.model_dir, map_id, mode, cache=False)
-         if state and state["dataset_fingerprint"] == data["dataset_fingerprint"] and existing:
-             return existing.payload["id"]
-         data["metrics"] = validate_buckets(data, self.cancel)
-diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
---- a/app/zones/web/settings.js
-+++ b/app/zones/web/settings.js
-@@ -77,23 +77,27 @@
-   async function resumeWhenReady() {
-     if (!resumePending || !active || document.hidden || resuming || initializing || refreshing || saving || reconciling) return;
-     resumePending = false; resuming = true;
-+    let retryLater = false;
-     try {
-       if (!initialized || !authorized) {
-         initFailures = 0; authAttempts = 0; authRequested = false;
-         await initialize();
-       } else {
-         if (pendingMode) { pendingMode.attempts = 0; await reconcileMode(); }
--        else await readSettings(writeEpoch, true);
-+        else if (!await readSettings(writeEpoch, true)) resumePending = true;
-         await refresh();
-       }
-     } catch (error) {
-       if (!active || document.hidden) return;
-       if (error.status === 401 || error.status === 403) sessionRequired();
--      else text('connection', '设置暂不可用，切回页面后会继续同步。');
-+      else {
-+        resumePending = true; retryLater = true;
-+        text('connection', '设置暂不可用，稍后自动同步。');
-+      }
-     } finally {
-       resuming = false;
-       if (initialized && authorized) schedule();
--      void resumeWhenReady();
-+      if (!retryLater) void resumeWhenReady();
-       drainRefresh();
-     }
-   }
-@@ -178,7 +182,10 @@
-   }
-   function schedule() {
-     clearTimeout(timer);
--    if (active && authorized && initialized && !document.hidden) timer = setTimeout(refresh, 5000);
-+    if (active && authorized && initialized && !document.hidden) timer = setTimeout(() => {
-+      if (resumePending) void resumeWhenReady();
-+      else void refresh();
-+    }, 5000);
-   }
-   function drainRefresh() {
-     if (refreshPending && active && authorized && initialized && !document.hidden && !refreshing && !saving &&
-diff --git a/app/zones/web/index.html b/app/zones/web/index.html
---- a/app/zones/web/index.html
-+++ b/app/zones/web/index.html
-@@ -1,5 +1,5 @@
- <!doctype html>
--<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=51aaa647d57f"><script defer src="/zones/settings.js?v=6b6d487fea36"></script></head>
-+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=51aaa647d57f"><script defer src="/zones/settings.js?v=93356b580f6c"></script></head>
- <body><main>
- <p id="connection" class="muted" role="status">正在读取圈型预测状态…</p>
- <section><h1>Circle Analyzer / KNN</h1><label for="prediction-mode">对局模式</label><select id="prediction-mode" disabled><option value="auto">自动</option><option value="normal">普通匹配</option><option value="competitive">竞技排位</option></select><p id="mode-message" role="status"></p><p class="muted">自动模式无法区分圈型时，可手动选择实际对局模式。</p></section>
 diff --git a/app/zones/backend/app/services/config_service.py b/app/zones/backend/app/services/config_service.py
 --- a/app/zones/backend/app/services/config_service.py
 +++ b/app/zones/backend/app/services/config_service.py
@@ -258,3 +211,85 @@ diff --git a/app/zones/backend/app/services/config_service.py b/app/zones/backen
          if not isinstance(content, dict):
              raise AppError(
                  code="CONFIG_INVALID",
+diff --git a/app/zones/backend/app/services/training.py b/app/zones/backend/app/services/training.py
+--- a/app/zones/backend/app/services/training.py
++++ b/app/zones/backend/app/services/training.py
+@@ -169,7 +169,7 @@
+             return None
+         state = self.connection.execute("SELECT * FROM analyzer_state WHERE map_id=? AND match_type=?",
+                                         (map_id, mode)).fetchone()
+-        existing = load_bundle(self.connection, self.config, self.model_dir, map_id, mode)
++        existing = load_bundle(self.connection, self.config, self.model_dir, map_id, mode, cache=False)
+         if state and state["dataset_fingerprint"] == data["dataset_fingerprint"] and existing:
+             return existing.payload["id"]
+         data["metrics"] = validate_buckets(data, self.cancel)
+diff --git a/app/zones/web/index.html b/app/zones/web/index.html
+--- a/app/zones/web/index.html
++++ b/app/zones/web/index.html
+@@ -1,5 +1,5 @@
+ <!doctype html>
+-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=51aaa647d57f"><script defer src="/zones/settings.js?v=6b6d487fea36"></script></head>
++<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=51aaa647d57f"><script defer src="/zones/settings.js?v=10d3c19ac958"></script></head>
+ <body><main>
+ <p id="connection" class="muted" role="status">正在读取圈型预测状态…</p>
+ <section><h1>Circle Analyzer / KNN</h1><label for="prediction-mode">对局模式</label><select id="prediction-mode" disabled><option value="auto">自动</option><option value="normal">普通匹配</option><option value="competitive">竞技排位</option></select><p id="mode-message" role="status"></p><p class="muted">自动模式无法区分圈型时，可手动选择实际对局模式。</p></section>
+diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
+--- a/app/zones/web/settings.js
++++ b/app/zones/web/settings.js
+@@ -77,23 +77,27 @@
+   async function resumeWhenReady() {
+     if (!resumePending || !active || document.hidden || resuming || initializing || refreshing || saving || reconciling) return;
+     resumePending = false; resuming = true;
++    let retryLater = false;
+     try {
+       if (!initialized || !authorized) {
+         initFailures = 0; authAttempts = 0; authRequested = false;
+         await initialize();
+       } else {
+         if (pendingMode) { pendingMode.attempts = 0; await reconcileMode(); }
+-        else await readSettings(writeEpoch, true);
++        else if (!await readSettings(writeEpoch, true)) resumePending = true;
+         await refresh();
+       }
+     } catch (error) {
+       if (!active || document.hidden) return;
+       if (error.status === 401 || error.status === 403) sessionRequired();
+-      else text('connection', '设置暂不可用，切回页面后会继续同步。');
++      else {
++        resumePending = true; retryLater = true;
++        text('connection', '设置暂不可用，稍后自动同步。');
++      }
+     } finally {
+       resuming = false;
+       if (initialized && authorized) schedule();
+-      void resumeWhenReady();
++      if (!retryLater) void resumeWhenReady();
+       drainRefresh();
+     }
+   }
+@@ -102,7 +106,12 @@
+   }
+   async function readSettings(version, notify = false) {
+     const sequence = ++readSequence;
+-    const result = await request('/settings');
++    let result;
++    try { result = await request('/settings'); }
++    catch (error) {
++      if (!active || version !== writeEpoch || sequence < appliedRead) return null;
++      throw error;
++    }
+     if (!active || version !== writeEpoch || sequence < appliedRead) return null;
+     const changed = result.prediction_mode !== predictionMode;
+     applySettings(result); appliedRead = sequence;
+@@ -178,7 +187,10 @@
+   }
+   function schedule() {
+     clearTimeout(timer);
+-    if (active && authorized && initialized && !document.hidden) timer = setTimeout(refresh, 5000);
++    if (active && authorized && initialized && !document.hidden) timer = setTimeout(() => {
++      if (resumePending) void resumeWhenReady();
++      else void refresh();
++    }, 5000);
+   }
+   function drainRefresh() {
+     if (refreshPending && active && authorized && initialized && !document.hidden && !refreshing && !saving &&
