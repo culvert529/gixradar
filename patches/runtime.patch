@@ -4,7 +4,7 @@ diff --git a/app/build/index.html b/app/build/index.html
 @@ -1 +1 @@
 -<!doctype html><html lang="en"><head><meta charset="utf-8"/><link rel="icon" href="/favicon.ico"/><meta name="theme-color" content="#0e0e0e"/><meta name="description" content="GixRadar"/><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="GixRadar"><link rel="apple-touch-icon" href="/radar.png"/><link rel="manifest" href="/manifest.json"/><title>GixRadar</title><style>body,html{background-color:#0e0e0e}</style><script defer="defer" src="/static/js/gix-zones.js?v=5a283b356158"></script><script defer="defer" src="/static/js/main.747f18dd.js?follow=1&amp;zones=8eb56aff71ac"></script><link href="/static/css/main.257cb343.css" rel="stylesheet"><link rel="stylesheet" href="/static/css/gix-zones.css?v=2a4d20b3abc1"></head><body><noscript>You need to enable JavaScript to run this app.</noscript><div id="root"></div><div id="hidden-box"></div></body></html>
 \ No newline at end of file
-+<!doctype html><html lang="en"><head><meta charset="utf-8"/><link rel="icon" href="/favicon.ico"/><meta name="theme-color" content="#0e0e0e"/><meta name="description" content="GixRadar"/><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="GixRadar"><link rel="apple-touch-icon" href="/radar.png"/><link rel="manifest" href="/manifest.json"/><title>GixRadar</title><style>body,html{background-color:#0e0e0e}</style><script defer="defer" src="/static/js/gix-zones.js?v=536528988bf1"></script><script defer="defer" src="/static/js/main.747f18dd.js?follow=1&amp;zones=8eb56aff71ac"></script><link href="/static/css/main.257cb343.css" rel="stylesheet"><link rel="stylesheet" href="/static/css/gix-zones.css?v=2a4d20b3abc1"></head><body><noscript>You need to enable JavaScript to run this app.</noscript><div id="root"></div><div id="hidden-box"></div></body></html>
++<!doctype html><html lang="en"><head><meta charset="utf-8"/><link rel="icon" href="/favicon.ico"/><meta name="theme-color" content="#0e0e0e"/><meta name="description" content="GixRadar"/><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="GixRadar"><link rel="apple-touch-icon" href="/radar.png"/><link rel="manifest" href="/manifest.json"/><title>GixRadar</title><style>body,html{background-color:#0e0e0e}</style><script defer="defer" src="/static/js/gix-zones.js?v=352c893fd342"></script><script defer="defer" src="/static/js/main.747f18dd.js?follow=1&amp;zones=8eb56aff71ac"></script><link href="/static/css/main.257cb343.css" rel="stylesheet"><link rel="stylesheet" href="/static/css/gix-zones.css?v=2a4d20b3abc1"></head><body><noscript>You need to enable JavaScript to run this app.</noscript><div id="root"></div><div id="hidden-box"></div></body></html>
 \ No newline at end of file
 diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
 --- a/app/build/static/js/gix-zones.js
@@ -30,6 +30,21 @@ diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
        prediction = autoPrediction;
        lastAutoSuccess = now(); nextAutoAt = now() + 30000; autoFailures = 0;
        autoStatus = prediction ? '自动预测 · Circle Analyzer / ' + (source === 'analyzer_knn' ? 'KNN' : '规则估计')
+@@ -316,12 +319,13 @@
+   }
+   function predictedCircle(value, size) {
+     if (!record(value) || !record(value.center) || !integer(value.phase) || value.phase < 1 || value.phase > 8 ||
+-        !['analyzer_knn', 'rule_baseline'].includes(value.source) ||
++        value.source !== 'analyzer_knn' ||
+         !(value.sample_count === null || integer(value.sample_count) && value.sample_count >= 0)) return null;
+     return circle(value.center.x, value.center.y, value.radius, size);
+   }
+   function sanitizeResult(value, size, mapId) {
+     if (!record(value) || value.map_id !== mapId || value.engine !== 'pubg_circle_analyzer_knn' ||
++        value.quality_policy !== 'chronological-relative-knn-v1' ||
+         !['auto', 'normal', 'competitive'].includes(value.match_type) ||
+         !(value.current_phase === null || integer(value.current_phase) && value.current_phase >= 1 && value.current_phase <= 8) ||
+         !(value.model_run_id === null || typeof value.model_run_id === 'string' && value.model_run_id.length > 0 && value.model_run_id.length <= 200) ||
 diff --git a/app/zones/backend/app/core/config.py b/app/zones/backend/app/core/config.py
 --- a/app/zones/backend/app/core/config.py
 +++ b/app/zones/backend/app/core/config.py
@@ -70,7 +85,6 @@ diff --git a/app/zones/backend/app/db/connection.py b/app/zones/backend/app/db/c
  
  
 diff --git a/app/zones/backend/app/db/repository.py b/app/zones/backend/app/db/repository.py
-deleted file mode 100644
 --- a/app/zones/backend/app/db/repository.py
 +++ /dev/null
 @@ -1,67 +0,0 @@
@@ -144,11 +158,209 @@ deleted file mode 100644
 diff --git a/app/zones/backend/app/services/analyzer.py b/app/zones/backend/app/services/analyzer.py
 --- a/app/zones/backend/app/services/analyzer.py
 +++ b/app/zones/backend/app/services/analyzer.py
-@@ -254,10 +254,17 @@
+@@ -21,7 +21,14 @@
+ ALGORITHM = "KNeighborsRegressor(k=5,weights=uniform,p=2)"
+ UPSTREAM_COMMIT = "d2490eec5bd99aaf1e3883a593853d6a46f2002d"
+ K = 5
+-INFERENCE_VERSION = 2
++INFERENCE_VERSION = 3
++QUALITY_POLICY_VERSION = 1
++# Conservative product admission thresholds, not an accuracy guarantee.
++MIN_QUALITY_MATCHES = 20
++MIN_MEAN_IMPROVEMENT = .10
++MAX_MEDIAN_NORMALIZED_ERROR = .5
++MAX_P90_NORMALIZED_ERROR = 1.0
++PAIR_RELATIVE_TOLERANCE = 1e-5
+ GEOMETRY_POLICY_VERSION = 2
+ GEOMETRY_POLICY = "nested-circles-v2"
+ MODES = ("normal", "competitive")
+@@ -75,25 +82,48 @@
+     return profiles
+ 
+ 
++def valid_pair(row):
++    """A true future circle shrinks and nests; tolerate 1e-5 of parent radius."""
++    if (not isinstance(row, (list, tuple)) or len(row) != 7
++            or not isinstance(row[0], str) or any(number(value) is None for value in row[1:])):
++        return False
++    current, future = row[5], row[6]
++    tolerance = max(1e-6, current * PAIR_RELATIVE_TOLERANCE)
++    allowance = current - future
++    return (future > 0 and allowance > tolerance
++            and hypot(row[3]-row[1], row[4]-row[2]) <= allowance + tolerance)
++
++
++def training_pairs(rows):
++    """Keep one valid observation per match without modifying stored history."""
++    seen, result = set(), []
++    for row in rows:
++        if valid_pair(row) and row[0] not in seen:
++            seen.add(row[0])
++            result.append(row)
++    return result
++
++
+ def train_knn(rows):
+-    """Same two-output split as upstream; features are prior circle x,y only."""
+-    if len({row[0] for row in rows}) < K:
+-        return None
+-    matrix = np.asarray([row[1:5] for row in rows], dtype=np.float64)
+-    if matrix.ndim != 2 or matrix.shape[1] != 4 or not np.isfinite(matrix).all():
+-        return None
++    """Two k=5 regressors learn displacement / available shrink distance."""
++    rows = training_pairs(rows)
++    if len(rows) < K:
++        return None
++    matrix = np.asarray([row[1:7] for row in rows], dtype=np.float64)
++    displacement = (matrix[:, 2:4] - matrix[:, :2]) / (matrix[:, 4] - matrix[:, 5])[:, None]
+     x = KNeighborsRegressor(n_neighbors=K, n_jobs=1)
+     y = KNeighborsRegressor(n_neighbors=K, n_jobs=1)
+-    x.fit(matrix[:, :2], matrix[:, 2])
+-    y.fit(matrix[:, :2], matrix[:, 3])
++    x.fit(matrix[:, :2], displacement[:, 0])
++    y.fit(matrix[:, :2], displacement[:, 1])
+     return x, y
+ 
+ 
+ def predict_target(regressors, center, current_radius, target_radius, world_size):
+     """Shared by holdout evaluation and live KNN inference, including geometry."""
+     matrix = np.asarray([[center[0], center[1]]], dtype=np.float64)
+-    x = float(regressors[0].predict(matrix)[0])
+-    y = float(regressors[1].predict(matrix)[0])
++    allowance = max(0.0, current_radius-target_radius)
++    x = center[0] + float(regressors[0].predict(matrix)[0]) * allowance
++    y = center[1] + float(regressors[1].predict(matrix)[0]) * allowance
+     return constrain_center(x, y, center, current_radius, target_radius, world_size)
+ 
+ 
+@@ -108,10 +138,47 @@
+ 
+ 
+ def rule_target(center, current_radius, target_radius, world_size, target):
+-    shift = .25 if target == "next" else .6
+-    x = center[0] + (world_size/2-center[0])*shift
+-    y = center[1] + (world_size/2-center[1])*shift
+-    return constrain_center(x, y, center, current_radius, target_radius, world_size)
++    """Same-center comparison baseline; serving must not present it as a forecast."""
++    return constrain_center(*center, center, current_radius, target_radius, world_size)
++
++
++def quality_failures(metric):
++    """Recompute admission from measured fields; never trust an accepted flag."""
++    failures = []
++    if any(type(metric.get(field)) is not int or metric[field] != expected
++           for field, expected in (("inference_version", INFERENCE_VERSION),
++                ("geometry_policy_version", GEOMETRY_POLICY_VERSION), ("quality_policy_version", QUALITY_POLICY_VERSION))):
++        failures.append("quality_policy_outdated")
++    if metric.get("validation_available") is not True:
++        failures.append("validation_unavailable")
++    if metric.get("chronology_complete") is not True:
++        failures.append("chronology_incomplete")
++    if (type(metric.get("evaluated_matches")) is not int
++            or metric["evaluated_matches"] < MIN_QUALITY_MATCHES):
++        failures.append("insufficient_independent_matches")
++    if (type(metric.get("holdout_matches")) is not int
++            or metric.get("evaluated_matches") != metric.get("holdout_matches")):
++        failures.append("evaluation_incomplete")
++    if any(number(metric.get(field)) is None or metric[field] < 0 for field in
++           ("mean_center_error", "rule_mean_center_error", "median_center_error", "p90_center_error")):
++        failures.append("error_metrics_invalid")
++    for field, maximum, reason in (
++            ("normalized_median_error", MAX_MEDIAN_NORMALIZED_ERROR, "median_error_too_large"),
++            ("normalized_p90_error", MAX_P90_NORMALIZED_ERROR, "p90_error_too_large")):
++        value = number(metric.get(field))
++        if value is None or not 0 <= value <= maximum:
++            failures.append(reason)
++    improvement = number(metric.get("mean_improvement_fraction"))
++    if improvement is None or improvement < MIN_MEAN_IMPROVEMENT:
++        failures.append("insufficient_baseline_improvement")
++    mean, base = number(metric.get("mean_center_error")), number(metric.get("rule_mean_center_error"))
++    if (mean is not None and base is not None and improvement is not None
++            and abs(improvement - ((base-mean)/base if base > 0 else 0.0)) > 1e-9):
++        failures.append("baseline_improvement_inconsistent")
++    lower = number(metric.get("paired_improvement_lower95"))
++    if lower is None or lower <= 0:
++        failures.append("paired_improvement_unconfirmed")
++    return failures
+ 
+ 
+ def predict_circles(phase, center, current_radius, world_size, target_radii,
+@@ -199,6 +266,8 @@
+             or type(value.get("inference_version")) is not int or value["inference_version"] != INFERENCE_VERSION
+             or type(value.get("geometry_policy_version")) is not int
+             or value["geometry_policy_version"] != GEOMETRY_POLICY_VERSION
++            or type(value.get("quality_policy_version")) is not int
++            or value["quality_policy_version"] != QUALITY_POLICY_VERSION
+             or value.get("map_id") != map_id or value.get("match_type") != mode
+             or value.get("world_size") != world_size or not isinstance(value.get("pairs"), dict)
+             or not isinstance(value.get("observations"), dict)):
+@@ -217,6 +286,8 @@
+                 return False
+             if any(number(x) is None or not 0 < x <= world_size*2 for x in row[5:7]):
+                 return False
++            if not valid_pair(row):
++                return False
+     for phase, rows in value["observations"].items():
+         if phase not in {str(x) for x in range(1, 9)} or not isinstance(rows, list) or len(rows) > MAX_MATCHES:
+             return False
+@@ -227,6 +298,12 @@
+                     or number(row[1]) is None or not 0 < row[1] <= world_size*2):
+                 return False
+             seen.add(row[0]); ids.add(row[0])
++    order, dates = value.get("match_order"), value.get("match_dates")
++    if (not isinstance(order, list) or len(order) != len(ids)
++            or any(not isinstance(identity, str) for identity in order) or set(order) != ids
++            or not isinstance(dates, dict) or set(dates) != ids
++            or any(not isinstance(date, str) for date in dates.values())):
++        return False
+     sample_ids = {(row[0], key.split(":")[0]) for key, rows in value["pairs"].items() for row in rows}
+     training_ids = {row[0] for rows in value["pairs"].values() for row in rows}
+     if (len(ids) > MAX_MATCHES or type(value.get("sample_count")) is not int
+@@ -239,13 +316,35 @@
+     for key, metric in metrics.items():
+         if key not in value["pairs"] or not isinstance(metric, dict) or type(metric.get("validation_available")) is not bool:
+             return False
+-        if (metric.get("inference_version") != INFERENCE_VERSION
+-                or metric.get("geometry_policy_version") != GEOMETRY_POLICY_VERSION):
++        if (any(type(metric.get(field)) is not int or metric[field] != expected
++                for field, expected in (("inference_version", INFERENCE_VERSION),
++                    ("geometry_policy_version", GEOMETRY_POLICY_VERSION), ("quality_policy_version", QUALITY_POLICY_VERSION)))
++                or type(metric.get("chronology_complete")) is not bool
++                or type(metric.get("quality_accepted")) is not bool):
+             return False
++        for field in ("training_matches", "holdout_matches", "evaluated_matches", "rejected_pair_count"):
++            if type(metric.get(field)) is not int or metric[field] < 0:
++                return False
++        if metric["evaluated_matches"] > metric["holdout_matches"]:
++            return False
++        for field in ("mean_center_error", "median_center_error", "p90_center_error",
++                      "rule_mean_center_error", "normalized_median_error", "normalized_p90_error",
++                      "mean_improvement_fraction", "paired_improvement_lower95", "center_within_radius_fraction"):
++            if metric.get(field) is not None and number(metric[field]) is None:
++                return False
+         if metric["validation_available"]:
+-            for field in ("mean_center_error", "rule_mean_center_error"):
++            for field in ("mean_center_error", "median_center_error", "p90_center_error",
++                          "rule_mean_center_error", "normalized_median_error", "normalized_p90_error"):
+                 if number(metric.get(field)) is None or metric[field] < 0:
+                     return False
++            for field in ("mean_improvement_fraction", "paired_improvement_lower95"):
++                if number(metric.get(field)) is None:
++                    return False
++            hit = number(metric.get("center_within_radius_fraction"))
++            if hit is None or not 0 <= hit <= 1 or metric["evaluated_matches"] == 0:
++                return False
++        if metric["quality_accepted"] != (not quality_failures(metric)):
++            return False
+     return True
+ 
+ 
+@@ -254,10 +353,18 @@
      payload: dict
      models: dict = field(default_factory=dict)
      lock: threading.RLock = field(default_factory=threading.RLock)
 +    _profiles_cache: dict | None = field(default=None, init=False, repr=False, compare=False)
++    _pair_counts: dict = field(default_factory=dict, init=False, repr=False, compare=False)
  
      @property
      def profiles(self):
@@ -163,7 +375,40 @@ diff --git a/app/zones/backend/app/services/analyzer.py b/app/zones/backend/app/
  
      def regressors(self, key):
          with self.lock:
-@@ -378,9 +385,9 @@
+@@ -266,15 +373,19 @@
+             return self.models[key]
+ 
+     def ready(self, key):
+-        return len(self.payload["pairs"].get(key, [])) >= K
++        # Checkpoint rows are immutable, just like the cached radius profiles.
++        # Status and quality scans must not revalidate 1,000 pairs per call.
++        with self.lock:
++            if key not in self._pair_counts:
++                self._pair_counts[key] = len(training_pairs(self.payload["pairs"].get(key, [])))
++            return self._pair_counts[key] >= K
+ 
+     def validated(self, key):
+         metric = self.payload.get("metrics", {}).get(key, {})
+         return (self.payload.get("inference_version") == INFERENCE_VERSION
+                 and self.payload.get("geometry_policy_version") == GEOMETRY_POLICY_VERSION
+-                and metric.get("inference_version") == INFERENCE_VERSION
+-                and metric.get("geometry_policy_version") == GEOMETRY_POLICY_VERSION
+-                and bool(metric.get("validation_available", False)))
++                and self.payload.get("quality_policy_version") == QUALITY_POLICY_VERSION
++                and self.ready(key) and not quality_failures(metric))
+ 
+ 
+ 
+@@ -307,7 +418,7 @@
+         size = config.get_map(map_id)["world_size"]
+         cache_key = (str(path.resolve()), stat.st_mtime_ns, stat.st_size, row["artifact_sha256"],
+                      row["dataset_fingerprint"], map_id, mode, size,
+-                     INFERENCE_VERSION, GEOMETRY_POLICY_VERSION)
++                     INFERENCE_VERSION, GEOMETRY_POLICY_VERSION, QUALITY_POLICY_VERSION)
+         return path, cache_key, row, size, map_id, mode
+     except (OSError, ValueError, TypeError, KeyError):
+         return None
+@@ -378,9 +489,9 @@
      return bundle
  
  
@@ -175,6 +420,36 @@ diff --git a/app/zones/backend/app/services/analyzer.py b/app/zones/backend/app/
  
  
  def _summarize_bundle(bundle, map_id, mode):
+@@ -388,17 +499,27 @@
+     keys = [key for key in payload["pairs"] if bundle.ready(key)]
+     model = None
+     if keys:
++        measured = [payload.get("metrics", {}).get(key, {}) for key in keys]
++        evaluated = [metric["evaluated_matches"] for metric in measured
++                     if metric.get("validation_available") is True and type(metric.get("evaluated_matches")) is int]
+         model = {"map_id": map_id, "match_type": mode, "model_run_id": payload["id"],
+                  "algorithm": ALGORITHM, "sample_count": payload["sample_count"],
+                  "training_match_count": payload["training_match_count"],
+-                 "validation_available": any(bundle.validated(key) for key in keys),
++                 "validation_available": any(payload.get("metrics", {}).get(key, {}).get("validation_available") is True for key in keys),
++                 "qualified_buckets": sum(bundle.validated(key) for key in keys),
++                 "quality_policy_version": QUALITY_POLICY_VERSION,
++                 "quality_reasons": sorted({reason for metric in measured for reason in quality_failures(metric)})[:16],
++                 "evaluated_matches_min": min(evaluated) if evaluated else 0,
++                 "evaluated_matches_max": max(evaluated) if evaluated else 0,
+                  "ready_buckets": len(keys)}
+     stages = []
+     for phase, profile in bundle.profiles.items():
+         stages.append({"map_id": map_id, "match_type": mode, "phase": phase,
+             "radius": profile["radius"], "observation_matches": profile["sample_count"],
+             "calibrated": profile["reliable"], "next_ready": bundle.ready(f"{phase}:next"),
+-            "final_ready": bundle.ready(f"{phase}:final")})
++            "final_ready": bundle.ready(f"{phase}:final"),
++            "next_qualified": bundle.validated(f"{phase}:next"),
++            "final_qualified": bundle.validated(f"{phase}:final")})
+     return model, stages
+ 
+ 
 diff --git a/app/zones/backend/app/services/config_service.py b/app/zones/backend/app/services/config_service.py
 --- a/app/zones/backend/app/services/config_service.py
 +++ b/app/zones/backend/app/services/config_service.py
@@ -211,10 +486,292 @@ diff --git a/app/zones/backend/app/services/config_service.py b/app/zones/backen
          if not isinstance(content, dict):
              raise AppError(
                  code="CONFIG_INVALID",
+diff --git a/app/zones/backend/app/services/prediction.py b/app/zones/backend/app/services/prediction.py
+--- a/app/zones/backend/app/services/prediction.py
++++ b/app/zones/backend/app/services/prediction.py
+@@ -1,9 +1,9 @@
+-"""Observed-radius stage resolution and the new per-mode KNN engine only."""
++"""Resolve observed stages and serve independently qualified KNN targets."""
+ from __future__ import annotations
+ from statistics import median
+ from app.core.errors import AppError
+ from app.services.analyzer import (ENGINE, MODES, MAX_RELATIVE_RADIUS_ERROR, PHASE_MARGIN,
+-    GEOMETRY_POLICY, number, load_bundle, predict_target, rule_target, predict_circles, model_summaries)
++    GEOMETRY_POLICY, number, load_bundle, predict_target, predict_circles, model_summaries)
+ 
+ 
+ def stage_candidate(bundle, radius):
+@@ -44,7 +44,8 @@
+             raise AppError("UNSUPPORTED_MATCH_TYPE", "Choose auto, normal or competitive")
+         result = {"map_id": map_id, "current_phase": None, "next_circle": None,
+                   "final_circle": None, "model_run_id": None, "warnings": [],
+-                  "engine": ENGINE, "match_type": mode, "geometry_policy": GEOMETRY_POLICY}
++                  "engine": ENGINE, "match_type": mode, "geometry_policy": GEOMETRY_POLICY,
++                  "quality_policy": "chronological-relative-knn-v1"}
+         warnings = result["warnings"]
+         bundles = self.bundles(map_id, mode)
+         if mode in MODES:
+@@ -78,9 +79,9 @@
+                         result["match_type"] = name
+                         warnings.append("match_type_inferred_from_distinct_observed_radii")
+                 if selected is None:
+-                    warnings.append("single_mode_geometry_only_match_type_unverified")
++                    warnings.append("single_mode_match_type_unverified_no_prediction")
+             else:
+-                warnings.append("match_type_ambiguous_geometry_only")
++                warnings.append("match_type_ambiguous_no_prediction")
+         result["current_phase"] = phase
+         warnings.append("phase_inferred_from_observed_radius")
+         if value.get("current_phase") is not None and value["current_phase"] != phase:
+@@ -88,8 +89,20 @@
+         if phase == 8:
+             warnings.append("observed_final_phase_no_future_circle")
+             return result
++        # Missing data for one mode does not identify the user's actual mode.
++        # A calibrated radius is not evidence for a future circle's position.
++        if selected is None:
++            return result
+         target_radii, regressors, sample_counts = {}, {}, {}
+         for target, target_phase in (("next", phase+1), ("final", 8)):
++            key = f"{phase}:{target}"
++            if phase == 7:
++                # Both labels are the same phase-8 observation. Certify the
++                # exact shared model that predict_circles will actually use.
++                key = "7:next"
++            if not selected.validated(key):
++                warnings.append("prediction_quality_not_qualified:"+target)
++                continue
+             profiles = [bundle.profiles.get(target_phase) for bundle in geometry]
+             if not profiles or any(not profile or not profile["reliable"] for profile in profiles):
+                 warnings.append("target_radius_unobserved_or_uncalibrated:"+target)
+@@ -99,12 +112,15 @@
+             if max(abs(item-target_radius)/target_radius for item in radii) > .05 or target_radius >= radius:
+                 warnings.append("target_radius_ambiguous:"+target)
+                 continue
++            model = selected.regressors(key)
++            if model is None:
++                warnings.append("prediction_model_unavailable:"+target)
++                continue
+             target_radii[target] = target_radius
+-            key = f"{phase}:{target}"
+-            regressors[target] = selected.regressors(key) if selected else None
+-            sample_counts[target] = len(selected.payload["pairs"].get(key, [])) if selected else None
++            regressors[target] = model
++            sample_counts[target] = len(selected.payload["pairs"].get(key, []))
+         circles, geometry_warnings = predict_circles(phase, (x,y), radius, size, target_radii,
+-            regressors, sample_counts, knn_predict=predict_target, rule_predict=rule_target)
++            regressors, sample_counts, knn_predict=predict_target)
+         warnings.extend(geometry_warnings)
+         used_knn = False
+         for target, circle in circles.items():
+@@ -113,15 +129,10 @@
+                 continue
+             if circle["source"] == "analyzer_knn":
+                 used_knn = True
+-                key = f"{phase}:{'next' if phase == 7 else target}"
+-                if not selected.validated(key):
+-                    warnings.append("knn_independent_validation_unavailable:"+target)
+-                metric = selected.payload.get("metrics",{}).get(key,{})
+-                if (metric.get("validation_available") and metric.get("rule_mean_center_error") is not None
+-                        and metric["mean_center_error"] > metric["rule_mean_center_error"]):
+-                    warnings.append("knn_not_better_than_rule_on_holdout:"+target)
+             else:
+-                warnings.append("calibrated_geometry_fallback:"+target)
++                # Serving must never turn a missing model into an estimate.
++                result[target+"_circle"] = None
++                warnings.append("prediction_model_unavailable:"+target)
+         if used_knn:
+             result["model_run_id"] = selected.payload["id"]
+         result["warnings"] = list(dict.fromkeys(warnings))
 diff --git a/app/zones/backend/app/services/training.py b/app/zones/backend/app/services/training.py
 --- a/app/zones/backend/app/services/training.py
 +++ b/app/zones/backend/app/services/training.py
-@@ -169,7 +169,7 @@
+@@ -10,13 +10,15 @@
+ import os
+ import tempfile
+ from math import hypot
++from statistics import median
++import numpy as np
+ from app.core.errors import AppError
+ from app.core.timestamps import parsed_time
+ from app.services.pubg_api import Cancelled
+ from app.services.analyzer import (ENGINE, ALGORITHM, UPSTREAM_COMMIT, K, MODES, MAX_MATCHES,
+-    INFERENCE_VERSION, GEOMETRY_POLICY_VERSION, MAX_ARTIFACT_BYTES, number, fingerprint,
++    INFERENCE_VERSION, GEOMETRY_POLICY_VERSION, QUALITY_POLICY_VERSION, MAX_ARTIFACT_BYTES, number, fingerprint,
+     radius_profiles, train_knn, predict_target, predict_circles,
+-    rule_target, load_bundle, valid_payload)
++    rule_target, load_bundle, valid_payload, valid_pair, training_pairs, quality_failures)
+ 
+ 
+ def build_dataset(connection, config, map_id, mode):
+@@ -69,7 +71,7 @@
+             matches[identity] = {}; order.append(identity)
+             dates[identity] = row["created_at"] if isinstance(row["created_at"], str) else ""
+         matches[identity].setdefault(phase, values)
+-    observations, pairs = {}, {}
++    observations, pairs, rejected = {}, {}, {}
+     for identity in order:
+         circles = matches[identity]
+         for phase, value in circles.items():
+@@ -81,39 +83,82 @@
+             for target, target_phase in (("next", phase+1), ("final", 8)):
+                 if target_phase in circles:
+                     future = circles[target_phase]
+-                    pairs.setdefault(f"{phase}:{target}", []).append(
+-                        [identity, current[0], current[1], future[0], future[1], current[2], future[2]])
++                    key = f"{phase}:{target}"
++                    pair = [identity, current[0], current[1], future[0], future[1], current[2], future[2]]
++                    if valid_pair(pair):
++                        pairs.setdefault(key, []).append(pair)
++                    else:
++                        rejected[key] = rejected.get(key, 0) + 1
+     sample_ids = {(row[0], key.split(":")[0]) for key, values in pairs.items() for row in values}
+     training_ids = {row[0] for values in pairs.values() for row in values}
+     data = {"schema_version": 1, "engine": ENGINE, "algorithm": ALGORITHM, "k": K,
+             "inference_version": INFERENCE_VERSION, "geometry_policy_version": GEOMETRY_POLICY_VERSION,
++            "quality_policy_version": QUALITY_POLICY_VERSION,
+             "upstream_commit": UPSTREAM_COMMIT, "map_id": map_id, "match_type": mode,
+             "world_size": size, "match_order": order, "match_dates": dates,
+-            "observations": observations, "pairs": pairs,
++            "observations": observations, "pairs": pairs, "rejected_pair_counts": rejected,
+             "sample_count": len(sample_ids), "training_match_count": len(training_ids)}
+     data["dataset_fingerprint"] = fingerprint(data)
+     return data
+ 
+ 
++def _paired_lower95(errors, baseline, cancel):
++    """Deterministic paired-match bootstrap; lower endpoint in world centimeters."""
++    differences = np.asarray(baseline, dtype=np.float64) - np.asarray(errors, dtype=np.float64)
++    rng = np.random.default_rng(8371)
++    means = []
++    for start in range(0, 2000, 200):
++        if cancel.is_set():
++            raise Cancelled()
++        indices = rng.integers(0, len(differences), size=(min(200, 2000-start), len(differences)))
++        means.extend(np.mean(differences[indices], axis=1).tolist())
++    return float(np.quantile(means, .025))
++
++
+ def validate_buckets(data, cancel):
++    """Latest-20% match holdout; every companion/profile uses earlier dated IDs.
++
++    Admission thresholds were fixed before inspecting comparison results. They
++    reject weak point forecasts; they do not guarantee a future circle position.
++    Final errors take the worse of next-present and next-absent serving contexts.
++    """
+     metrics = {}
+-    order = data["match_order"]
++    original_order = data["match_order"]
++    dates = data.get("match_dates", {})
++    times = {identity: parsed_time(dates.get(identity)) for identity in original_order}
++    chronology_complete = (len(set(original_order)) == len(original_order)
++        and all(value is not None for value in times.values()))
++    # Undated matches remain in the checkpoint/history, but cannot leak into
++    # chronological validation training, radius calibration or held-out truth.
++    order = sorted((identity for identity, instant in times.items() if instant is not None),
++                   key=lambda identity: (times[identity], original_order.index(identity)))
+     for key, rows in sorted(data["pairs"].items()):
+         if cancel.is_set():
+             raise Cancelled()
+-        ids = {row[0] for row in rows}
++        usable = training_pairs(rows)
++        ids = {row[0] for row in usable}
+         eligible = [identity for identity in order if identity in ids]
+         holdout_count = max(1, int(len(eligible)*.2))
+         held = set(eligible[-holdout_count:])
+         # The companion target and radius calibration must not see held IDs or
+         # later matches, even if those matches lack this target's label.
+-        allowed = set(order[:order.index(eligible[-holdout_count])]) if eligible else set()
+-        train = [row for row in rows if row[0] in allowed]
+-        test = [row for row in rows if row[0] in held]
++        cutoff = times[eligible[-holdout_count]] if eligible else None
++        # Simultaneous timestamps are not provably earlier, regardless of the
++        # deterministic match-ID tie order used for selecting the holdout.
++        allowed = {identity for identity in order if times[identity] < cutoff} if cutoff is not None else set()
++        train = [row for row in usable if row[0] in allowed]
++        test = [row for row in usable if row[0] in held]
+         result = {"validation_available": False, "training_matches": len(train),
+-                  "holdout_matches": len(test), "mean_center_error": None,
+-                  "rule_mean_center_error": None, "inference_version": INFERENCE_VERSION,
+-                  "geometry_policy_version": GEOMETRY_POLICY_VERSION}
++                  "holdout_matches": len(test), "evaluated_matches": 0,
++                  "mean_center_error": None, "median_center_error": None,
++                  "p90_center_error": None, "rule_mean_center_error": None,
++                  "normalized_median_error": None, "normalized_p90_error": None,
++                  "center_within_radius_fraction": None, "mean_improvement_fraction": None,
++                  "paired_improvement_lower95": None, "chronology_complete": chronology_complete,
++                  "rejected_pair_count": data.get("rejected_pair_counts", {}).get(key, 0) + len(rows)-len(usable),
++                  "quality_accepted": False, "inference_version": INFERENCE_VERSION,
++                  "geometry_policy_version": GEOMETRY_POLICY_VERSION,
++                  "quality_policy_version": QUALITY_POLICY_VERSION}
+         phase, target = key.split(":"); phase = int(phase)
+         target_phase = phase+1 if target == "next" else 8
+         models, counts = {}, {}
+@@ -122,32 +167,49 @@
+                 raise Cancelled()
+             companion_rows = [r for r in data["pairs"].get(f"{phase}:{companion}", []) if r[0] in allowed]
+             models[companion] = train_knn(companion_rows)
+-            counts[companion] = len(companion_rows)
++            counts[companion] = len(training_pairs(companion_rows))
+         profiles = radius_profiles(data["observations"], allowed)
+         radius = profiles.get(target_phase)
+         target_radii = {name: profile["radius"] for name, p in (("next",phase+1),("final",8))
+                         if (profile := profiles.get(p)) and profile["reliable"]}
+-        if models[target] and test and radius and radius["reliable"]:
+-            errors, baseline = [], []
++        actual_target = "next" if phase == 7 and models.get("next") else target
++        result["model_target"] = actual_target
++        if models[actual_target] and test and radius and radius["reliable"]:
++            errors, baseline, normalized = [], [], []
+             for row in test:
+                 if cancel.is_set():
+                     raise Cancelled()
+                 if radius["radius"] >= row[5]:
+                     continue
+                 center = (row[1], row[2])
+-                predicted, _ = predict_circles(phase, center, row[5], data["world_size"],
+-                    target_radii, models, counts, knn_predict=predict_target, rule_predict=rule_target)
+-                rule, _ = predict_circles(phase, center, row[5], data["world_size"],
+-                    target_radii, knn_predict=predict_target, rule_predict=rule_target)
+-                if predicted[target] is None or rule[target] is None:
++                contexts = [(target_radii, models)]
++                if target == "final" and phase < 7:
++                    contexts.append(({"final": radius["radius"]}, {"final": models["final"]}))
++                candidates = []
++                for context_radii, context_models in contexts:
++                    predicted, _ = predict_circles(phase, center, row[5], data["world_size"],
++                        context_radii, context_models, counts, knn_predict=predict_target, rule_predict=rule_target)
++                    if predicted[target] is not None:
++                        point = predicted[target]["center"]
++                        candidates.append(hypot(point["x"]-row[3], point["y"]-row[4]))
++                if len(candidates) != len(contexts):
+                     continue
+-                point, base = predicted[target]["center"], rule[target]["center"]
+-                errors.append(hypot(point["x"]-row[3], point["y"]-row[4]))
+-                baseline.append(hypot(base["x"]-row[3], base["y"]-row[4]))
++                error = max(candidates)
++                errors.append(error)
++                normalized.append(error/radius["radius"])
++                baseline.append(hypot(center[0]-row[3], center[1]-row[4]))
+             if errors:
+-                result.update(validation_available=True, mean_center_error=sum(errors)/len(errors),
+-                              rule_mean_center_error=sum(baseline)/len(baseline),
+-                              evaluated_matches=len(errors))
++                mean_error, mean_baseline = sum(errors)/len(errors), sum(baseline)/len(baseline)
++                result.update(validation_available=True, mean_center_error=mean_error,
++                    median_center_error=float(median(errors)), p90_center_error=float(np.quantile(errors, .9)),
++                    rule_mean_center_error=mean_baseline, evaluated_matches=len(errors),
++                    normalized_median_error=float(median(normalized)),
++                    normalized_p90_error=float(np.quantile(normalized, .9)),
++                    center_within_radius_fraction=sum(value <= 1 for value in normalized)/len(normalized),
++                    mean_improvement_fraction=(mean_baseline-mean_error)/mean_baseline if mean_baseline else 0.0,
++                    paired_improvement_lower95=_paired_lower95(errors, baseline, cancel))
++        result["quality_reasons"] = quality_failures(result)
++        result["quality_accepted"] = not result["quality_reasons"]
+         metrics[key] = result
+     return metrics
+ 
+@@ -169,7 +231,7 @@
              return None
          state = self.connection.execute("SELECT * FROM analyzer_state WHERE map_id=? AND match_type=?",
                                          (map_id, mode)).fetchone()
@@ -226,13 +783,19 @@ diff --git a/app/zones/backend/app/services/training.py b/app/zones/backend/app/
 diff --git a/app/zones/web/index.html b/app/zones/web/index.html
 --- a/app/zones/web/index.html
 +++ b/app/zones/web/index.html
-@@ -1,5 +1,5 @@
+@@ -1,9 +1,9 @@
  <!doctype html>
 -<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=51aaa647d57f"><script defer src="/zones/settings.js?v=6b6d487fea36"></script></head>
-+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=51aaa647d57f"><script defer src="/zones/settings.js?v=10d3c19ac958"></script></head>
++<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=51aaa647d57f"><script defer src="/zones/settings.js?v=34c22de04dbe"></script></head>
  <body><main>
  <p id="connection" class="muted" role="status">正在读取圈型预测状态…</p>
- <section><h1>Circle Analyzer / KNN</h1><label for="prediction-mode">对局模式</label><select id="prediction-mode" disabled><option value="auto">自动</option><option value="normal">普通匹配</option><option value="competitive">竞技排位</option></select><p id="mode-message" role="status"></p><p class="muted">自动模式无法区分圈型时，可手动选择实际对局模式。</p></section>
+-<section><h1>Circle Analyzer / KNN</h1><label for="prediction-mode">对局模式</label><select id="prediction-mode" disabled><option value="auto">自动</option><option value="normal">普通匹配</option><option value="competitive">竞技排位</option></select><p id="mode-message" role="status"></p><p class="muted">自动模式无法区分圈型时，可手动选择实际对局模式。</p></section>
++<section><h1>Circle Analyzer / KNN</h1><label for="prediction-mode">对局模式</label><select id="prediction-mode" disabled><option value="auto">自动</option><option value="normal">普通匹配</option><option value="competitive">竞技排位</option></select><p id="mode-message" role="status"></p><p class="muted">自动模式仅在圈半径能明确区分对局模式时使用模型；无法区分时暂停叠加，也可手动选择实际模式。</p></section>
+ <section><h2>官方 API Key</h2><p id="configured" class="muted">正在读取…</p><form id="key-form" hidden><label for="api-key">新的 PUBG API Key</label><input id="api-key" type="password" autocomplete="new-password" placeholder="仅在需要配置或更换时填写" maxlength="4096" required><button id="save-key" type="submit">保存 API Key</button><p id="message" role="status"></p></form><p class="muted">保存后自动更新圈样本；密钥不会回显。</p></section>
+ <section><h2>自动采集与样本更新</h2><dl><dt>当前状态</dt><dd id="collector-state">—</dd><dt>采集计划</dt><dd id="interval">—</dd><dt>上次任务</dt><dd id="last-run">—</dd><dt>下次检查</dt><dd id="next-run">—</dd><dt>已收集比赛</dt><dd id="matches">—</dd><dt>圈型记录</dt><dd id="circles">—</dd></dl><p id="last-result" class="muted"></p><p id="task-error" class="error" role="status"></p><p class="muted">状态更新于 <span id="updated">—</span></p></section>
+-<section><h2>可用 KNN 样本</h2><ul id="models"></ul><p class="notice">圈预测默认开启，按地图和对局模式使用 Circle Analyzer / KNN。各阶段至少需要 5 场独立比赛；样本不足时仅按可用校准估计，无法判断时暂不显示。圈样本数与独立比赛数分开统计，不代表预测准确率；实际圈型以游戏为准。</p></section>
++<section><h2>模型与回测</h2><ul id="models"></ul><p class="notice">采集和训练自动运行。每个地图、模式、阶段分别检验：至少 20 场后续独立比赛，优于同心基线且误差达标，才叠加预测圈。未达标时暂不显示，不再用固定地图中心偏移代替预测。历史回测不保证下一圈位置，实际圈型以游戏为准。</p></section>
+ </main></body></html>
 diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
 --- a/app/zones/web/settings.js
 +++ b/app/zones/web/settings.js
@@ -281,7 +844,29 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
      if (!active || version !== writeEpoch || sequence < appliedRead) return null;
      const changed = result.prediction_mode !== predictionMode;
      applySettings(result); appliedRead = sequence;
-@@ -178,7 +187,10 @@
+@@ -169,16 +178,30 @@
+           !['normal', 'competitive'].includes(model.match_type)) continue;
+       const item = document.createElement('li'), name = document.createElement('span'), detail = document.createElement('span');
+       name.textContent = `${mapNames[model.map_id]} · ${modes[model.match_type]}`;
+-      detail.textContent = `${count(model.sample_count)} 条圈样本 / ${count(model.training_match_count)} 场独立比赛 · ${model.validation_available ? '有独立验证' : '尚无独立验证'}`;
++      detail.textContent = `${count(model.training_match_count)} 场独立比赛 · 达标预测 ${count(model.qualified_buckets)} / ${count(model.ready_buckets)} · 最多 ${count(model.evaluated_matches_max)} 场留出验证`;
++      if (!model.qualified_buckets) {
++        const reasons = new Set(Array.isArray(model.quality_reasons) ? model.quality_reasons : []);
++        const notes = [];
++        if (reasons.has('insufficient_independent_matches')) notes.push('留出比赛不足 20 场');
++        if (['insufficient_baseline_improvement', 'paired_improvement_unconfirmed', 'baseline_improvement_inconsistent'].some(code => reasons.has(code))) notes.push('未稳定优于同心基线');
++        if (['median_error_too_large', 'p90_error_too_large', 'error_metrics_invalid'].some(code => reasons.has(code))) notes.push('误差验证未达标');
++        if (reasons.has('chronology_incomplete')) notes.push('比赛时间信息不完整');
++        if (reasons.has('quality_policy_outdated')) notes.push('等待重新训练');
++        if (reasons.has('validation_unavailable')) notes.push('暂无有效回测');
++        detail.textContent += ' · 暂不叠加，继续采集训练' + (notes.length ? `（${notes.slice(0, 3).join('；')}）` : '');
++      }
+       item.append(name, detail); models.append(item);
+     }
+     if (!models.childElementCount) {
+-      const item = document.createElement('li'); item.textContent = '暂无可用 KNN 样本；仅使用已校准的圈型估计，无法判断时暂不显示。'; models.append(item);
++      const item = document.createElement('li'); item.textContent = '暂无达标预测；继续采集和训练，样本不足时暂不叠加。'; models.append(item);
+     }
    }
    function schedule() {
      clearTimeout(timer);

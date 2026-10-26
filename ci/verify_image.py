@@ -59,8 +59,8 @@ def verify_context(manifest_path, expected_release):
     need(manifest.get("source_release_sha256") == expected_release, "SOURCE_RELEASE_MISMATCH")
     installed, build = entries(manifest["files"]), entries(manifest["build_files"])
     revision = manifest.get("runtime_revision")
-    need(revision in {None, "cleanup1", "clock1", "profiles1", "settings1", "config1", "errors1"}, "UNSUPPORTED_RUNTIME_REVISION")
-    app_count = 996 if revision in {"cleanup1", "clock1", "profiles1", "settings1", "config1", "errors1"} else 997
+    need(revision in {None, "cleanup1", "clock1", "profiles1", "settings1", "config1", "errors1", "accuracy1"}, "UNSUPPORTED_RUNTIME_REVISION")
+    app_count = 996 if revision in {"cleanup1", "clock1", "profiles1", "settings1", "config1", "errors1", "accuracy1"} else 997
     need(len(installed) == app_count + 5 and len(build) == app_count + 31, "BASELINE_FILE_COUNTS")
     need(sum(n.startswith("app/") for n in installed) == app_count and
          sum(n.startswith("container/") for n in installed) == 5, "INSTALLED_ROOT_COUNTS")
@@ -177,7 +177,10 @@ def verify_http(client, manifest, mode, assets=False):
     for map_id, radius in (("taego", 63379.70703125), ("erangel", 192059.71875)):
         value = client.json("/api/zones/predict", body={"map_id": map_id,
             "current_circle_center": {"x": 408000, "y": 408000}, "current_radius": radius})
-        need(set(value) == {"map_id", "current_phase", "next_circle", "final_circle", "model_run_id", "warnings",
+        extra_keys = {"quality_policy"} if manifest.get("runtime_revision") == "accuracy1" else set()
+        if extra_keys:
+            need(value.get("quality_policy") == "chronological-relative-knn-v1", "PREDICTION_QUALITY_POLICY")
+        need(set(value) == extra_keys | {"map_id", "current_phase", "next_circle", "final_circle", "model_run_id", "warnings",
                             "engine", "match_type", "geometry_policy"}, "PREDICTION_SCHEMA")
         need(value["map_id"] == map_id and value["engine"] == "pubg_circle_analyzer_knn" and
              value["geometry_policy"] == "nested-circles-v2" and value["match_type"] == mode and
