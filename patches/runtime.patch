@@ -4,7 +4,7 @@ diff --git a/app/build/index.html b/app/build/index.html
 @@ -1 +1 @@
 -<!doctype html><html lang="en"><head><meta charset="utf-8"/><link rel="icon" href="/favicon.ico"/><meta name="theme-color" content="#0e0e0e"/><meta name="description" content="GixRadar"/><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="GixRadar"><link rel="apple-touch-icon" href="/radar.png"/><link rel="manifest" href="/manifest.json"/><title>GixRadar</title><style>body,html{background-color:#0e0e0e}</style><script defer="defer" src="/static/js/gix-zones.js?v=5a283b356158"></script><script defer="defer" src="/static/js/main.747f18dd.js?follow=1&amp;zones=8eb56aff71ac"></script><link href="/static/css/main.257cb343.css" rel="stylesheet"><link rel="stylesheet" href="/static/css/gix-zones.css?v=2a4d20b3abc1"></head><body><noscript>You need to enable JavaScript to run this app.</noscript><div id="root"></div><div id="hidden-box"></div></body></html>
 \ No newline at end of file
-+<!doctype html><html lang="en"><head><meta charset="utf-8"/><link rel="icon" href="/favicon.ico"/><meta name="theme-color" content="#0e0e0e"/><meta name="description" content="GixRadar"/><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="GixRadar"><link rel="apple-touch-icon" href="/radar.png"/><link rel="manifest" href="/manifest.json"/><title>GixRadar</title><style>body,html{background-color:#0e0e0e}</style><script defer="defer" src="/static/js/gix-zones.js?v=2be0905c9508"></script><script defer="defer" src="/static/js/main.747f18dd.js?follow=1&amp;zones=fd7462ec0bd4"></script><link href="/static/css/main.257cb343.css" rel="stylesheet"><link rel="stylesheet" href="/static/css/gix-zones.css?v=c3a882a79c43"></head><body><noscript>You need to enable JavaScript to run this app.</noscript><div id="root"></div><div id="hidden-box"></div></body></html>
++<!doctype html><html lang="en"><head><meta charset="utf-8"/><link rel="icon" href="/favicon.ico"/><meta name="theme-color" content="#0e0e0e"/><meta name="description" content="GixRadar"/><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="GixRadar"><link rel="apple-touch-icon" href="/radar.png"/><link rel="manifest" href="/manifest.json"/><title>GixRadar</title><style>body,html{background-color:#0e0e0e}</style><script defer="defer" src="/static/js/gix-zones.js?v=cd45b270595b"></script><script defer="defer" src="/static/js/main.747f18dd.js?follow=1&amp;zones=fd7462ec0bd4"></script><link href="/static/css/main.257cb343.css" rel="stylesheet"><link rel="stylesheet" href="/static/css/gix-zones.css?v=c3a882a79c43"></head><body><noscript>You need to enable JavaScript to run this app.</noscript><div id="root"></div><div id="hidden-box"></div></body></html>
 \ No newline at end of file
 diff --git a/app/build/static/css/gix-zones.css b/app/build/static/css/gix-zones.css
 --- a/app/build/static/css/gix-zones.css
@@ -18,7 +18,15 @@ diff --git a/app/build/static/css/gix-zones.css b/app/build/static/css/gix-zones
 diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
 --- a/app/build/static/js/gix-zones.js
 +++ b/app/build/static/js/gix-zones.js
-@@ -32,7 +32,10 @@
+@@ -25,14 +25,17 @@
+   let lastPayload = null, blockedPayload = null;
+   let currentSocket = null, socketInvalid = false, state = 'waiting', message = '等待雷达数据';
+   let opened = false, opening = false, panelError = '';
+-  let panelIntent = 0, settingsFrame = null, toggleButton = null;
++  let panelIntent = 0, settingsFrame = null, toggleButton = null, closeButton = null;
+   let candidatePin = null, authorizedPin = null, authorized = false, sessionReady = false, loginAttempted = false;
+   let authEpoch = 0, authPromise = null, authController = null;
+   let autoTimer = null, autoDue = Infinity, autoController = null, autoSequence = 0;
    let autoRunning = false, autoPrediction = null, nextAutoAt = 0, lastAutoStarted = -Infinity;
    let lastAutoSuccess = -Infinity, autoFailures = 0, autoBlocked = false;
    let autoStatus = '等待雷达登录', autoPhase = null, lastDataAt = 0, staleTimer = null;
@@ -30,7 +38,38 @@ diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
    const later = (callback, delay) => root.setTimeout(callback, delay);
    function emit() { for (const listener of listeners) { try { listener(); } catch (_) {} } }
    function setPin(value) {
-@@ -201,13 +204,13 @@
+@@ -45,6 +48,30 @@
+   }
+   function bindSettingsFrame(frame) { settingsFrame = frame; }
+   function bindToggleButton(button) { toggleButton = button; }
++  function focusDialogControl(control, preventScroll = true) {
++    if (!opened || !control || control.isConnected === false || typeof control.focus !== 'function') return false;
++    try { if (preventScroll) control.focus({preventScroll: true}); else control.focus(); return true; }
++    catch (_) { if (!preventScroll) return false; try { control.focus(); return true; } catch (_) { return false; } }
++  }
++  function focusCloseButton() { focusDialogControl(closeButton); }
++  function bindCloseButton(button) {
++    if (button === closeButton) return;
++    closeButton = button;
++    if (button) focusCloseButton();
++  }
++  function focusLastSettingControl() {
++    if (!opened) return;
++    try {
++      const document = settingsFrame && settingsFrame.contentDocument;
++      const controls = document ? document.querySelectorAll('a[href],button,input:not([type="hidden"]),select,textarea,[tabindex]') : [];
++      for (let index = controls.length - 1; index >= 0; index--) {
++        const control = controls[index];
++        if (control.disabled || control.tabIndex < 0 || !control.getClientRects().length) continue;
++        if (focusDialogControl(control, false)) return;
++      }
++    } catch (_) { /* The frame may be loading, unavailable or outside this origin. */ }
++    focusCloseButton();
++  }
+   function settingsChanged(event) {
+     if (!root.location || event.origin !== root.location.origin || !settingsFrame ||
+         event.source !== settingsFrame.contentWindow || !record(event.data) ||
+@@ -201,13 +228,13 @@
        const safe = sanitizeResult(result, snapshot.worldSize, snapshot.mapId);
        if (!safe) throw new Error('Invalid prediction response');
        autoPhase = result.current_phase;
@@ -47,7 +86,7 @@ diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
          : '当前模式或阶段暂无可用预测';
        emit();
      } catch (error) {
-@@ -316,12 +319,13 @@
+@@ -316,12 +343,13 @@
    }
    function predictedCircle(value, size) {
      if (!record(value) || !record(value.center) || !integer(value.phase) || value.phase < 1 || value.phase > 8 ||
@@ -63,7 +102,7 @@ diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
          !['auto', 'normal', 'competitive'].includes(value.match_type) ||
          !(value.current_phase === null || integer(value.current_phase) && value.current_phase >= 1 && value.current_phase <= 8) ||
          !(value.model_run_id === null || typeof value.model_run_id === 'string' && value.model_run_id.length > 0 && value.model_run_id.length <= 200) ||
-@@ -332,8 +336,7 @@
+@@ -332,8 +360,7 @@
      const final = value.final_circle === null ? null : predictedCircle(value.final_circle, size);
      if (value.next_circle !== null && !next || value.final_circle !== null && !final) return null;
      if (value.current_phase === null || value.current_phase === 8) return next || final ? null : { next, final };
@@ -73,7 +112,7 @@ diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
      return { next, final };
    }
    async function openSettings() {
-@@ -382,7 +385,7 @@
+@@ -382,7 +409,7 @@
        const h = React.createElement;
        return h(React.Fragment, null,
          h('div', { className: 'gix-zones-sr-only', role: 'status',
@@ -82,6 +121,22 @@ diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
            context ? autoStatus : '自动预测 · ' + message),
          h('button', { className: 'gix-zones-toggle', type: 'button', title: opening ? '正在连接，点击取消' : '圈型预测',
            'aria-label': opening ? '取消打开圈型预测' : '圈型预测', 'aria-expanded': opened, 'aria-busy': opening,
+@@ -396,11 +423,13 @@
+           h('section', { className: 'gix-zones-panel', role: 'dialog', 'aria-modal': true,
+             'aria-label': '圈型预测' },
+           h('header', { className: 'gix-zones-header' },
++            h('span', { className: 'gix-zones-sr-only', tabIndex: 0, onFocus: focusLastSettingControl }),
+             h('strong', null, '圈型预测'),
+             h('button', { className: 'gix-zones-close', type: 'button', 'aria-label': '关闭圈型预测',
+-              onClick: () => setOpen(false) }, '×')),
++              onClick: () => setOpen(false), ref: bindCloseButton }, '×')),
+           panelError ? h('p', { className: 'gix-zones-panel-error', role: 'alert' }, panelError)
+-            : h('iframe', { className: 'gix-zones-frame', title: '圈型预测设置和采集状态', src: '/zones/', ref: bindSettingsFrame }))) : null);
++            : h('iframe', { className: 'gix-zones-frame', title: '圈型预测设置和采集状态', src: '/zones/', ref: bindSettingsFrame }),
++          h('span', { className: 'gix-zones-sr-only', tabIndex: 0, onFocus: focusCloseButton }))) : null);
+     },
+     Overlay(props) {
+       useUpdates();
 diff --git a/app/build/static/js/main.747f18dd.js b/app/build/static/js/main.747f18dd.js
 index 68e3a1dbba5c3231b454848a2b0ab9de27b90bcd..4abb4d18ed945adfb4f9be1b54efc3a02cd14161 100644
 GIT binary patch
