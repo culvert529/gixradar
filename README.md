@@ -1,1 +1,1 @@
-GixRadar 容器镜像与 Docker Compose 部署。
+添加了刷圈预测功能的gixradar前端。
