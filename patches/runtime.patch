@@ -3230,6 +3230,14 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
          raise AppError("PUBG_RESPONSE_INVALID","Official sample data is incomplete",502)
      return result
  
+@@ -467,6 +468,7 @@
+     def status(self):
+         with self.guard:
+             result={"enabled":True,"api_key_configured":bool(self.settings.pubg_api_key),"running":self.running,
++                    "prediction_mode":self.settings.prediction_mode,
+                     "interval_minutes":30,"batch_size":20,"next_run_at":iso(self.next_run_at),
+                     "last_run_at":iso(self.last_run_at),"last_result":dict(self.last_result),"last_error_code":self.last_error_code}
+         connection=connect_database(self.settings.database_path)
 diff --git a/app/zones/backend/app/services/config_service.py b/app/zones/backend/app/services/config_service.py
 --- a/app/zones/backend/app/services/config_service.py
 +++ b/app/zones/backend/app/services/config_service.py
@@ -4064,7 +4072,7 @@ diff --git a/app/zones/web/index.html b/app/zones/web/index.html
 @@ -1,9 +1,9 @@
  <!doctype html>
 -<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=51aaa647d57f"><script defer src="/zones/settings.js?v=6b6d487fea36"></script></head>
-+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=c97345209f22"><script defer src="/zones/settings.js?v=1dbdbcefc1b0"></script></head>
++<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=c97345209f22"><script defer src="/zones/settings.js?v=645b1de6f84c"></script></head>
  <body><main>
  <p id="connection" class="muted" role="status">正在读取圈型预测状态…</p>
 -<section><h1>Circle Analyzer / KNN</h1><label for="prediction-mode">对局模式</label><select id="prediction-mode" disabled><option value="auto">自动</option><option value="normal">普通匹配</option><option value="competitive">竞技排位</option></select><p id="mode-message" role="status"></p><p class="muted">自动模式无法区分圈型时，可手动选择实际对局模式。</p></section>
@@ -4132,7 +4140,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
      if (!active || version !== writeEpoch || sequence < appliedRead) return null;
      const changed = result.prediction_mode !== predictionMode;
      applySettings(result); appliedRead = sequence;
-@@ -163,22 +172,31 @@
+@@ -163,22 +172,39 @@
      text('last-result', `检查 ${count(result.checked)} · 新增 ${count(result.inserted)} · 跳过 ${count(result.skipped)} · 失败 ${count(result.failed)}`);
      text('updated', new Date().toLocaleTimeString());
      text('task-error', problem);
@@ -4158,10 +4166,18 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
 +        ? `${count(model.sample_count)} 条可用样本 / ${count(model.training_match_count)} 场训练比赛 / ${count(model.validation_match_count)} 场验证比赛 · ${model.validation_available === true ? '有原版留出指标' : '暂无原版留出指标'}`
 +        : '暂无可用原版统计模型';
        item.append(name, detail); models.append(item);
--    }
+     }
 -    if (!models.childElementCount) {
 -      const item = document.createElement('li'); item.textContent = '暂无可用 KNN 样本；仅使用已校准的圈型估计，无法判断时暂不显示。'; models.append(item);
-     }
+-    }
++  }
++  function applyStatusMode(status, sequence) {
++    if (saving || pendingMode || sequence < appliedRead ||
++        !Object.prototype.hasOwnProperty.call(status, 'prediction_mode') || typeof status.prediction_mode !== 'string' ||
++        !Object.prototype.hasOwnProperty.call(modes, status.prediction_mode)) return;
++    const changed = status.prediction_mode !== predictionMode;
++    predictionMode = status.prediction_mode; byId('prediction-mode').value = predictionMode; appliedRead = sequence;
++    if (changed) notifySettingsChanged();
    }
    function schedule() {
      clearTimeout(timer);
@@ -4173,7 +4189,20 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
    }
    function drainRefresh() {
      if (refreshPending && active && authorized && initialized && !document.hidden && !refreshing && !saving &&
-@@ -248,6 +266,7 @@
+@@ -189,10 +215,10 @@
+     if (refreshing) { if (afterWrite) refreshPending = true; return; }
+     if (saving && !afterWrite) { refreshPending = true; return; }
+     refreshPending = false; refreshing = true; clearTimeout(timer);
+-    const version = writeEpoch;
++    const version = writeEpoch, sequence = ++readSequence;
+     try {
+       const status = await request('/collector/status');
+-      if (active && version === writeEpoch) { render(status); text('connection', '状态已连接。'); }
++      if (active && version === writeEpoch) { render(status); applyStatusMode(status, sequence); text('connection', '状态已连接。'); }
+     } catch (error) {
+       if (!active || document.hidden || version !== writeEpoch) return;
+       if (error.status === 401 || error.status === 403) sessionRequired();
+@@ -248,6 +274,7 @@
      if (document.hidden) { resumePending = true; for (const controller of controllers) controller.abort(); }
      else requestResume();
    });
