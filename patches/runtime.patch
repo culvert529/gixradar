@@ -4,8 +4,17 @@ diff --git a/app/build/index.html b/app/build/index.html
 @@ -1 +1 @@
 -<!doctype html><html lang="en"><head><meta charset="utf-8"/><link rel="icon" href="/favicon.ico"/><meta name="theme-color" content="#0e0e0e"/><meta name="description" content="GixRadar"/><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="GixRadar"><link rel="apple-touch-icon" href="/radar.png"/><link rel="manifest" href="/manifest.json"/><title>GixRadar</title><style>body,html{background-color:#0e0e0e}</style><script defer="defer" src="/static/js/gix-zones.js?v=5a283b356158"></script><script defer="defer" src="/static/js/main.747f18dd.js?follow=1&amp;zones=8eb56aff71ac"></script><link href="/static/css/main.257cb343.css" rel="stylesheet"><link rel="stylesheet" href="/static/css/gix-zones.css?v=2a4d20b3abc1"></head><body><noscript>You need to enable JavaScript to run this app.</noscript><div id="root"></div><div id="hidden-box"></div></body></html>
 \ No newline at end of file
-+<!doctype html><html lang="en"><head><meta charset="utf-8"/><link rel="icon" href="/favicon.ico"/><meta name="theme-color" content="#0e0e0e"/><meta name="description" content="GixRadar"/><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="GixRadar"><link rel="apple-touch-icon" href="/radar.png"/><link rel="manifest" href="/manifest.json"/><title>GixRadar</title><style>body,html{background-color:#0e0e0e}</style><script defer="defer" src="/static/js/gix-zones.js?v=2be0905c9508"></script><script defer="defer" src="/static/js/main.747f18dd.js?follow=1&amp;zones=8eb56aff71ac"></script><link href="/static/css/main.257cb343.css" rel="stylesheet"><link rel="stylesheet" href="/static/css/gix-zones.css?v=2a4d20b3abc1"></head><body><noscript>You need to enable JavaScript to run this app.</noscript><div id="root"></div><div id="hidden-box"></div></body></html>
++<!doctype html><html lang="en"><head><meta charset="utf-8"/><link rel="icon" href="/favicon.ico"/><meta name="theme-color" content="#0e0e0e"/><meta name="description" content="GixRadar"/><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="GixRadar"><link rel="apple-touch-icon" href="/radar.png"/><link rel="manifest" href="/manifest.json"/><title>GixRadar</title><style>body,html{background-color:#0e0e0e}</style><script defer="defer" src="/static/js/gix-zones.js?v=2be0905c9508"></script><script defer="defer" src="/static/js/main.747f18dd.js?follow=1&amp;zones=fd7462ec0bd4"></script><link href="/static/css/main.257cb343.css" rel="stylesheet"><link rel="stylesheet" href="/static/css/gix-zones.css?v=c3a882a79c43"></head><body><noscript>You need to enable JavaScript to run this app.</noscript><div id="root"></div><div id="hidden-box"></div></body></html>
 \ No newline at end of file
+diff --git a/app/build/static/css/gix-zones.css b/app/build/static/css/gix-zones.css
+--- a/app/build/static/css/gix-zones.css
++++ b/app/build/static/css/gix-zones.css
+@@ -9,3 +9,5 @@
+ .gix-zones-header strong{font-size:13px}.gix-zones-panel-error{margin:20px;color:#ffbea8}.gix-zones-close{flex:0 0 30px;width:30px;height:30px;padding:0;border:0;border-radius:6px;background:rgba(255,255,255,.07);color:#e9f0fa;font:23px/1 system-ui;cursor:pointer}.gix-zones-close:focus-visible{outline:2px solid #8bc9ff}
+ .gix-zones-frame{display:block;flex:1;min-height:0;width:100%;border:0;background:#10131c}
+ @media(max-width:640px){.gix-zones-backdrop{padding:6px}.gix-zones-panel{width:100%;height:min(740px,calc(100dvh - 12px));border-radius:8px}.gix-zones-header{padding-left:10px}}
++.radar-home{position:fixed;inset:0}
++.radar-home:not(.show){visibility:hidden}
 diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
 --- a/app/build/static/js/gix-zones.js
 +++ b/app/build/static/js/gix-zones.js
@@ -73,6 +82,19 @@ diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
            context ? autoStatus : '自动预测 · ' + message),
          h('button', { className: 'gix-zones-toggle', type: 'button', title: opening ? '正在连接，点击取消' : '圈型预测',
            'aria-label': opening ? '取消打开圈型预测' : '圈型预测', 'aria-expanded': opened, 'aria-busy': opening,
+diff --git a/app/build/static/js/main.747f18dd.js b/app/build/static/js/main.747f18dd.js
+index 68e3a1dbba5c3231b454848a2b0ab9de27b90bcd..4abb4d18ed945adfb4f9be1b54efc3a02cd14161 100644
+GIT binary patch
+delta 173
+zcmWN=Ne;mP0EW>RYN(pkP({r}(JsVsBshen#g|xES%?cbg2V~LdECJNl6QT6V|P6h
+zBTj-O1}V~H$YPSiB2R%LCCXH&Qp2WBgC;E;+Ar6z%wQLuHpl(;5It_5Z(khC)sA+x
+hr=Iq8phF$$SSLDFUuQbkg$BCRm98~>J681j`~jl>En5Hp
+
+delta 167
+zcmWN=Sq{Na0EW@D)YNON8ZT-tH9mEF9=^nbXSxAPkXV7(g|+xka_-NsbJGhBE;;ge
+z6ev=nOa&i9l^S&#G-(mgCZt1`9(@K3U)D33o5W%E@NIBSjn$Ekb)u0@b*6J&=u%g@
+W)>t>X)kJr?*MlDQ^iIwB_xS_GOD(1V
+
 diff --git a/app/zones/backend/app/core/config.py b/app/zones/backend/app/core/config.py
 --- a/app/zones/backend/app/core/config.py
 +++ b/app/zones/backend/app/core/config.py
