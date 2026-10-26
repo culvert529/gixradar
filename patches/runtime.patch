@@ -118,3 +118,51 @@ index 21a14f07569b465b9cc503e3fda7a50d8db5a738..ac0efa89b2b981e421ef02f83810d1a2
 \ No newline at end of file
 +<!doctype html><html lang="en"><head><meta charset="utf-8"/><link rel="icon" href="/favicon.ico"/><meta name="theme-color" content="#0e0e0e"/><meta name="description" content="GixRadar"/><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="GixRadar"><link rel="apple-touch-icon" href="/radar.png"/><link rel="manifest" href="/manifest.json"/><title>GixRadar</title><style>body,html{background-color:#0e0e0e}</style><script defer="defer" src="/static/js/gix-zones.js?v=536528988bf1"></script><script defer="defer" src="/static/js/main.747f18dd.js?follow=1&amp;zones=8eb56aff71ac"></script><link href="/static/css/main.257cb343.css" rel="stylesheet"><link rel="stylesheet" href="/static/css/gix-zones.css?v=2a4d20b3abc1"></head><body><noscript>You need to enable JavaScript to run this app.</noscript><div id="root"></div><div id="hidden-box"></div></body></html>
 \ No newline at end of file
+diff --git a/app/zones/backend/app/services/analyzer.py b/app/zones/backend/app/services/analyzer.py
+index d68233c57d6d1b28590c575351f7c35decd88477..b1eccd5084a30fc4556532bbef5ea733fff52c60 100644
+--- a/app/zones/backend/app/services/analyzer.py
++++ b/app/zones/backend/app/services/analyzer.py
+@@ -254,10 +254,17 @@ class Bundle:
+     payload: dict
+     models: dict = field(default_factory=dict)
+     lock: threading.RLock = field(default_factory=threading.RLock)
++    _profiles_cache: dict | None = field(default=None, init=False, repr=False, compare=False)
+ 
+     @property
+     def profiles(self):
+-        return radius_profiles(self.payload["observations"])
++        # Validated checkpoint observations stay fixed for this Bundle's lifetime.
++        if self._profiles_cache is None:
++            with self.lock:
++                if self._profiles_cache is None:
++                    self._profiles_cache = radius_profiles(self.payload["observations"])
++        # Preserve independent caller dictionaries; all profile fields are scalar.
++        return {phase: dict(profile) for phase, profile in self._profiles_cache.items()}
+ 
+     def regressors(self, key):
+         with self.lock:
+@@ -378,9 +385,9 @@ def _load_bundle(reference, *, cache):
+     return bundle
+ 
+ 
+-def load_bundle(connection, config, model_dir, map_id, mode):
++def load_bundle(connection, config, model_dir, map_id, mode, *, cache=True):
+     """Reads only the new engine's JSON table/checkpoint, never old model_runs."""
+-    return _load_bundle(_bundle_reference(connection, config, model_dir, map_id, mode), cache=True)
++    return _load_bundle(_bundle_reference(connection, config, model_dir, map_id, mode), cache=cache)
+ 
+ 
+ def _summarize_bundle(bundle, map_id, mode):
+diff --git a/app/zones/backend/app/services/training.py b/app/zones/backend/app/services/training.py
+index 50d522195a2ae418d3444670b06ef568fa563e2c..4a7b6fcb3da1066dd58a0933d67938e3d382d623 100644
+--- a/app/zones/backend/app/services/training.py
++++ b/app/zones/backend/app/services/training.py
+@@ -169,7 +169,7 @@ class AnalyzerTrainer:
+             return None
+         state = self.connection.execute("SELECT * FROM analyzer_state WHERE map_id=? AND match_type=?",
+                                         (map_id, mode)).fetchone()
+-        existing = load_bundle(self.connection, self.config, self.model_dir, map_id, mode)
++        existing = load_bundle(self.connection, self.config, self.model_dir, map_id, mode, cache=False)
+         if state and state["dataset_fingerprint"] == data["dataset_fingerprint"] and existing:
+             return existing.payload["id"]
+         data["metrics"] = validate_buckets(data, self.cancel)
