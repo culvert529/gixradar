@@ -4,7 +4,7 @@ diff --git a/app/build/index.html b/app/build/index.html
 @@ -1 +1 @@
 -<!doctype html><html lang="en"><head><meta charset="utf-8"/><link rel="icon" href="/favicon.ico"/><meta name="theme-color" content="#0e0e0e"/><meta name="description" content="GixRadar"/><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="GixRadar"><link rel="apple-touch-icon" href="/radar.png"/><link rel="manifest" href="/manifest.json"/><title>GixRadar</title><style>body,html{background-color:#0e0e0e}</style><script defer="defer" src="/static/js/gix-zones.js?v=5a283b356158"></script><script defer="defer" src="/static/js/main.747f18dd.js?follow=1&amp;zones=8eb56aff71ac"></script><link href="/static/css/main.257cb343.css" rel="stylesheet"><link rel="stylesheet" href="/static/css/gix-zones.css?v=2a4d20b3abc1"></head><body><noscript>You need to enable JavaScript to run this app.</noscript><div id="root"></div><div id="hidden-box"></div></body></html>
 \ No newline at end of file
-+<!doctype html><html lang="en"><head><meta charset="utf-8"/><link rel="icon" href="/favicon.ico"/><meta name="theme-color" content="#0e0e0e"/><meta name="description" content="GixRadar"/><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="GixRadar"><link rel="apple-touch-icon" href="/radar.png"/><link rel="manifest" href="/manifest.json"/><title>GixRadar</title><style>body,html{background-color:#0e0e0e}</style><script defer="defer" src="/static/js/gix-zones.js?v=d671a187fe12"></script><script defer="defer" src="/static/js/main.747f18dd.js?follow=1&amp;zones=fd7462ec0bd4"></script><link href="/static/css/main.257cb343.css" rel="stylesheet"><link rel="stylesheet" href="/static/css/gix-zones.css?v=c3a882a79c43"></head><body><noscript>You need to enable JavaScript to run this app.</noscript><div id="root"></div><div id="hidden-box"></div></body></html>
++<!doctype html><html lang="en"><head><meta charset="utf-8"/><link rel="icon" href="/favicon.ico"/><meta name="theme-color" content="#0e0e0e"/><meta name="description" content="GixRadar"/><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="GixRadar"><link rel="apple-touch-icon" href="/radar.png"/><link rel="manifest" href="/manifest.json"/><title>GixRadar</title><style>body,html{background-color:#0e0e0e}</style><script defer="defer" src="/static/js/gix-zones.js?v=60a3f839b3b1"></script><script defer="defer" src="/static/js/main.747f18dd.js?follow=1&amp;zones=fd7462ec0bd4"></script><link href="/static/css/main.257cb343.css" rel="stylesheet"><link rel="stylesheet" href="/static/css/gix-zones.css?v=c3a882a79c43"></head><body><noscript>You need to enable JavaScript to run this app.</noscript><div id="root"></div><div id="hidden-box"></div></body></html>
 \ No newline at end of file
 diff --git a/app/build/static/css/gix-zones.css b/app/build/static/css/gix-zones.css
 --- a/app/build/static/css/gix-zones.css
@@ -69,7 +69,34 @@ diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
    function settingsChanged(event) {
      if (!root.location || event.origin !== root.location.origin || !settingsFrame ||
          event.source !== settingsFrame.contentWindow || !record(event.data) ||
-@@ -201,13 +228,13 @@
+@@ -177,10 +204,16 @@
+     const timeout = later(() => controller.abort(), 7000);
+     const current = () => sequence === autoSequence && authorized && context &&
+       context.revision === snapshot.revision && context.mapId === snapshot.mapId;
++    const fresh = () => {
++      if (now() - lastDataAt < 10000) return true;
++      blockedPayload = lastPayload;
++      invalidate('waiting', '雷达数据已停止，预测已清除');
++      return false;
++    };
+     try {
+       autoStatus = '自动预测 · 计算中'; emit();
+       await ensureSession();
+-      if (!current()) return;
++      if (!current() || !fresh()) return;
+       const requestPrediction = () => jsonRequest('/predict', controller, { method: 'POST',
+         headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+           map_id: snapshot.mapId,
+@@ -194,24 +227,24 @@
+         // Reuse that authenticated radar PIN once; a second 401 blocks retries.
+         if (!current() || !sessionReady || error.status !== 401) throw error;
+         await ensureSession({verify: true});
+-        if (!current()) return;
++        if (!current() || !fresh()) return;
+         result = await requestPrediction();
+       }
+-      if (!current()) return;
++      if (!current() || !fresh()) return;
        const safe = sanitizeResult(result, snapshot.worldSize, snapshot.mapId);
        if (!safe) throw new Error('Invalid prediction response');
        autoPhase = result.current_phase;
@@ -86,7 +113,12 @@ diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
          : '当前模式或阶段暂无可用预测';
        emit();
      } catch (error) {
-@@ -246,11 +273,18 @@
+-      if (!current()) return;
++      if (!current() || !fresh()) return;
+       if (error && (error.status === 401 || error.status === 403)) {
+         sessionReady = false; autoBlocked = true; autoPrediction = null; prediction = null;
+         autoStatus = '自动预测 · 等待雷达重新登录';
+@@ -246,11 +279,18 @@
    }
    function ingest(payload) {
      // Original FileReader callbacks can finish after a socket has closed.
@@ -105,7 +137,7 @@ diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
      }
      if (payload && payload === blockedPayload) return;
      const newPayload = payload !== lastPayload;
-@@ -269,7 +303,7 @@
+@@ -269,7 +309,7 @@
      }
      const next = { revision, mapId: map[0], worldSize: size, whiteCircle: white };
      context = next; state = 'live'; message = '实时白圈已同步';
@@ -114,7 +146,7 @@ diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
      queueAutomatic();
      emit();
    }
-@@ -298,7 +332,7 @@
+@@ -298,7 +338,7 @@
      });
      socket.addEventListener('message', event => {
        if (currentSocket !== socket || !record(event)) return;
@@ -123,7 +155,7 @@ diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
        if (currentSocket === socket && event.data === 'PIN:ERROR') {
          acceptedSequence = received.sequence; acceptedPayload = null;
          authorized = false; resetAuthentication(); candidatePin = null; authorizedPin = null; autoBlocked = true; opened = false; opening = false;
-@@ -316,12 +350,13 @@
+@@ -316,12 +356,13 @@
    }
    function predictedCircle(value, size) {
      if (!record(value) || !record(value.center) || !integer(value.phase) || value.phase < 1 || value.phase > 8 ||
@@ -139,7 +171,7 @@ diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
          !['auto', 'normal', 'competitive'].includes(value.match_type) ||
          !(value.current_phase === null || integer(value.current_phase) && value.current_phase >= 1 && value.current_phase <= 8) ||
          !(value.model_run_id === null || typeof value.model_run_id === 'string' && value.model_run_id.length > 0 && value.model_run_id.length <= 200) ||
-@@ -332,8 +367,7 @@
+@@ -332,8 +373,7 @@
      const final = value.final_circle === null ? null : predictedCircle(value.final_circle, size);
      if (value.next_circle !== null && !next || value.final_circle !== null && !final) return null;
      if (value.current_phase === null || value.current_phase === 8) return next || final ? null : { next, final };
@@ -149,7 +181,7 @@ diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
      return { next, final };
    }
    async function openSettings() {
-@@ -382,7 +416,7 @@
+@@ -382,7 +422,7 @@
        const h = React.createElement;
        return h(React.Fragment, null,
          h('div', { className: 'gix-zones-sr-only', role: 'status',
@@ -158,7 +190,7 @@ diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
            context ? autoStatus : '自动预测 · ' + message),
          h('button', { className: 'gix-zones-toggle', type: 'button', title: opening ? '正在连接，点击取消' : '圈型预测',
            'aria-label': opening ? '取消打开圈型预测' : '圈型预测', 'aria-expanded': opened, 'aria-busy': opening,
-@@ -396,11 +430,13 @@
+@@ -396,18 +436,20 @@
            h('section', { className: 'gix-zones-panel', role: 'dialog', 'aria-modal': true,
              'aria-label': '圈型预测' },
            h('header', { className: 'gix-zones-header' },
@@ -174,6 +206,14 @@ diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
      },
      Overlay(props) {
        useUpdates();
+       React.useEffect(() => { ingest(props.payload); }, [props.payload]);
+       const mapping = typeof props.map === 'string' && own(maps, props.map) ? maps[props.map] : null;
+       const header = props.payload && Array.isArray(props.payload._) && props.payload._[0];
+-      if (!mapping || !context || !prediction || context.mapId !== mapping[0] ||
++      if (!mapping || !context || !prediction || now() - lastDataAt >= 10000 || context.mapId !== mapping[0] ||
+           !Array.isArray(header) || header[0] !== 2 ||
+           header[2] !== context.whiteCircle.x || header[3] !== context.whiteCircle.y ||
+           header[4] !== context.whiteCircle.radius ||
 diff --git a/app/build/static/js/main.747f18dd.js b/app/build/static/js/main.747f18dd.js
 index 68e3a1dbba5c3231b454848a2b0ab9de27b90bcd..4abb4d18ed945adfb4f9be1b54efc3a02cd14161 100644
 GIT binary patch
@@ -337,7 +377,7 @@ diff --git a/app/zones/backend/app/db/repository.py b/app/zones/backend/app/db/r
 diff --git a/app/zones/backend/app/main.py b/app/zones/backend/app/main.py
 --- a/app/zones/backend/app/main.py
 +++ b/app/zones/backend/app/main.py
-@@ -68,11 +68,11 @@
+@@ -68,11 +68,12 @@
          return {"status":"ok"}
  
      @application.get("/api/config/zone-phases")
@@ -345,12 +385,21 @@ diff --git a/app/zones/backend/app/main.py b/app/zones/backend/app/main.py
 +    def phases(request: Request, map_id: str, match_type: str | None = None):
          current = request.app.state.settings
          with database_connection(current.database_path) as connection:
++            connection.execute("BEGIN")
              return PredictionService(connection, ConfigService(current.config_dir), current.model_dir,
 -                                     current.prediction_mode).phase_config(map_id)
 +                                     current.prediction_mode).phase_config(map_id, match_type)
  
      @application.get("/api/settings")
      def settings_summary(request: Request):
+@@ -107,6 +108,7 @@
+     def predict(body: PredictRequest, request: Request):
+         current=request.app.state.settings
+         with database_connection(current.database_path) as connection:
++            connection.execute("BEGIN")
+             return PredictionService(connection,ConfigService(current.config_dir),current.model_dir,current.prediction_mode).predict(body.model_dump())
+ 
+     return application
 diff --git a/app/zones/backend/app/morse_native/__init__.py b/app/zones/backend/app/morse_native/__init__.py
 new file mode 100644
 --- /dev/null
@@ -3230,7 +3279,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
          raise AppError("PUBG_RESPONSE_INVALID","Official sample data is incomplete",502)
      return result
  
-@@ -467,6 +468,7 @@
+@@ -467,10 +468,12 @@
      def status(self):
          with self.guard:
              result={"enabled":True,"api_key_configured":bool(self.settings.pubg_api_key),"running":self.running,
@@ -3238,6 +3287,11 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
                      "interval_minutes":30,"batch_size":20,"next_run_at":iso(self.next_run_at),
                      "last_run_at":iso(self.last_run_at),"last_result":dict(self.last_result),"last_error_code":self.last_error_code}
          connection=connect_database(self.settings.database_path)
+         try:
++            connection.execute("BEGIN")
+             result["total_matches"]=connection.execute("SELECT COUNT(*) FROM matches m WHERE EXISTS(SELECT 1 FROM circle_phases c WHERE c.match_id=m.match_id)").fetchone()[0]
+             result["total_circles"]=connection.execute("SELECT COUNT(*) FROM circle_phases").fetchone()[0]
+             result["models"],result["supported_stages"]=model_summaries(connection,self.config,self.settings.model_dir)
 diff --git a/app/zones/backend/app/services/config_service.py b/app/zones/backend/app/services/config_service.py
 --- a/app/zones/backend/app/services/config_service.py
 +++ b/app/zones/backend/app/services/config_service.py
@@ -4072,7 +4126,7 @@ diff --git a/app/zones/web/index.html b/app/zones/web/index.html
 @@ -1,9 +1,9 @@
  <!doctype html>
 -<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=51aaa647d57f"><script defer src="/zones/settings.js?v=6b6d487fea36"></script></head>
-+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=c97345209f22"><script defer src="/zones/settings.js?v=645b1de6f84c"></script></head>
++<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=c97345209f22"><script defer src="/zones/settings.js?v=94420ae537c9"></script></head>
  <body><main>
  <p id="connection" class="muted" role="status">正在读取圈型预测状态…</p>
 -<section><h1>Circle Analyzer / KNN</h1><label for="prediction-mode">对局模式</label><select id="prediction-mode" disabled><option value="auto">自动</option><option value="normal">普通匹配</option><option value="competitive">竞技排位</option></select><p id="mode-message" role="status"></p><p class="muted">自动模式无法区分圈型时，可手动选择实际对局模式。</p></section>
@@ -4189,7 +4243,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
    }
    function drainRefresh() {
      if (refreshPending && active && authorized && initialized && !document.hidden && !refreshing && !saving &&
-@@ -189,10 +215,10 @@
+@@ -189,12 +215,12 @@
      if (refreshing) { if (afterWrite) refreshPending = true; return; }
      if (saving && !afterWrite) { refreshPending = true; return; }
      refreshPending = false; refreshing = true; clearTimeout(timer);
@@ -4198,10 +4252,14 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
      try {
        const status = await request('/collector/status');
 -      if (active && version === writeEpoch) { render(status); text('connection', '状态已连接。'); }
-+      if (active && version === writeEpoch) { render(status); applyStatusMode(status, sequence); text('connection', '状态已连接。'); }
-     } catch (error) {
-       if (!active || document.hidden || version !== writeEpoch) return;
+-    } catch (error) {
+-      if (!active || document.hidden || version !== writeEpoch) return;
++      if (active && version === writeEpoch && sequence >= appliedRead) { render(status); applyStatusMode(status, sequence); text('connection', '状态已连接。'); }
++    } catch (error) {
++      if (!active || document.hidden || version !== writeEpoch || sequence < appliedRead) return;
        if (error.status === 401 || error.status === 403) sessionRequired();
+       else text('connection', '状态暂不可用，稍后自动刷新。');
+     } finally { refreshing = false; drainRefresh(); if (!refreshing) schedule(); void resumeWhenReady(); }
 @@ -248,6 +274,7 @@
      if (document.hidden) { resumePending = true; for (const controller of controllers) controller.abort(); }
      else requestResume();
