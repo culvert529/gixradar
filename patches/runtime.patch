@@ -1,0 +1,86 @@
+diff --git a/app/zones/backend/app/db/repository.py b/app/zones/backend/app/db/repository.py
+deleted file mode 100644
+index 6aed0cf5d1158685b5c2a7a0d8aa02d8a44c208c..0000000000000000000000000000000000000000
+--- a/app/zones/backend/app/db/repository.py
++++ /dev/null
+@@ -1,67 +0,0 @@
+-import sqlite3
+-from collections.abc import Iterable, Mapping, Sequence
+-from dataclasses import dataclass
+-from typing import Any
+-
+-Row = Mapping[str, Any]
+-Params = Sequence[Any] | Mapping[str, Any]
+-
+-
+-@dataclass(frozen=True)
+-class InsertResult:
+-    lastrowid: int
+-    rowcount: int
+-
+-
+-class SQLiteRepository:
+-    def __init__(self, connection: sqlite3.Connection) -> None:
+-        self.connection = connection
+-
+-    def execute(self, sql: str, params: Params = ()) -> sqlite3.Cursor:
+-        return self.connection.execute(sql, params)
+-
+-    def fetch_one(self, sql: str, params: Params = ()) -> sqlite3.Row | None:
+-        return self.connection.execute(sql, params).fetchone()
+-
+-    def fetch_all(self, sql: str, params: Params = ()) -> list[sqlite3.Row]:
+-        return list(self.connection.execute(sql, params).fetchall())
+-
+-    def insert_or_ignore(self, table: str, values: Row) -> InsertResult:
+-        columns, placeholders, params = self._prepare_insert(values)
+-        cursor = self.connection.execute(
+-            f"INSERT OR IGNORE INTO {table} ({columns}) VALUES ({placeholders})",
+-            params,
+-        )
+-        return InsertResult(lastrowid=cursor.lastrowid, rowcount=cursor.rowcount)
+-
+-    def upsert(self, table: str, values: Row, conflict_columns: Iterable[str]) -> InsertResult:
+-        columns, placeholders, params = self._prepare_insert(values)
+-        conflict_columns = tuple(conflict_columns)
+-        conflict_target = ", ".join(conflict_columns)
+-        update_columns = [column for column in values if column not in set(conflict_columns)]
+-        if not update_columns:
+-            sql = (
+-                f"INSERT INTO {table} ({columns}) VALUES ({placeholders}) "
+-                f"ON CONFLICT ({conflict_target}) DO NOTHING"
+-            )
+-        else:
+-            assignments = ", ".join(f"{column} = excluded.{column}" for column in update_columns)
+-            sql = (
+-                f"INSERT INTO {table} ({columns}) VALUES ({placeholders}) "
+-                f"ON CONFLICT ({conflict_target}) DO UPDATE SET {assignments}"
+-            )
+-
+-        cursor = self.connection.execute(sql, params)
+-        return InsertResult(lastrowid=cursor.lastrowid, rowcount=cursor.rowcount)
+-
+-    def executemany(self, sql: str, params: Iterable[Params]) -> sqlite3.Cursor:
+-        return self.connection.executemany(sql, params)
+-
+-    @staticmethod
+-    def _prepare_insert(values: Row) -> tuple[str, str, tuple[Any, ...]]:
+-        if not values:
+-            raise ValueError("values must not be empty")
+-        columns = ", ".join(values.keys())
+-        placeholders = ", ".join("?" for _ in values)
+-        params = tuple(values.values())
+-        return columns, placeholders, params
+diff --git a/app/zones/backend/app/core/config.py b/app/zones/backend/app/core/config.py
+index 514f46898140ef0ed0bb332d966dc478c782bf7c..6add49caa260a169b37bd68adf887faaf3380ebd 100644
+--- a/app/zones/backend/app/core/config.py
++++ b/app/zones/backend/app/core/config.py
+@@ -16,8 +16,6 @@
+ 
+ class Settings(BaseSettings):
+     _write_guard: RLock = PrivateAttr(default_factory=RLock)
+-    app_name: str = "GixRadar Circles"
+-    app_version: str = "2.0.0"
+     prediction_mode: Literal["auto", "normal", "competitive"] = "auto"
+     config_dir: Path = Field(default=PROJECT_ROOT / "config", alias="APP_CONFIG_DIR")
+     data_dir: Path = Field(default=DEFAULT_DATA_DIR, alias="APP_DATA_DIR")

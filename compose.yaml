@@ -1,0 +1,23 @@
+name: gixradar
+
+services:
+  gixradar:
+    image: ghcr.io/culvert529/gixradar:analyzer
+    container_name: gixradar
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,noexec,size=16m
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    stop_grace_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

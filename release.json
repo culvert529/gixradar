@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "version": "2.5.1-clean1",
+  "source_release_sha256": "d5732fecf94c06eae05c0221347a29c24cf9aeb9a1c864f4e3a382cdb0956014",
+  "release_tag": "source-d5732fecf94c",
+  "asset_name": "gixradar-image-context.zip",
+  "asset_size": 166913114,
+  "asset_sha256": "151b0c2c39637bb88794f68045a5298acdd04d2e1ad41ae3aca211c3198508e7",
+  "manifest_sha256": "3b370ed9b419aad1e479d19a87760a3674e5cb3f6f702f050b96161aaba5f499",
+  "app_files": 997,
+  "runtime_files": 1002,
+  "build_files": 1028,
+  "cleanup_sha256": "f9fa68d89410415293b5643ae2e328e876cad0163a5d8bf1ef27d6d41659220f",
+  "runtime_manifest_sha256": "3750af00cfa2ffa61482b0511126346d5ea5acaf6106e9de5bdaef5e481bfbec"
+}

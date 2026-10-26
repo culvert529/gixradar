@@ -1,0 +1,82 @@
+name: GixRadar image
+
+on:
+  workflow_dispatch:
+    inputs:
+      verify_public:
+        description: Verify anonymous pull of the published image without registry login
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: gixradar-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      IMAGE: ghcr.io/culvert529/gixradar
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Download the accepted build material
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag=$(python3 -c 'import json; print(json.load(open("release.json"))["release_tag"])')
+          asset=$(python3 -c 'import json; print(json.load(open("release.json"))["asset_name"])')
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --dir "$RUNNER_TEMP/material"
+          python3 ci/validate_context.py "$RUNNER_TEMP/material/$asset" build-context
+          cp Dockerfile .dockerignore build-context/
+
+      - name: Build and verify the image before publication
+        if: ${{ !inputs.verify_public }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(python3 -c 'import json; print(json.load(open("release.json"))["version"])')
+          docker build --platform linux/amd64 --build-arg "VERSION=$version" --build-arg "REVISION=$GITHUB_SHA" --tag "$IMAGE:$version" --iidfile "$RUNNER_TEMP/image-id" build-context
+          image_id=$(cat "$RUNNER_TEMP/image-id")
+          source_sha=$(python3 -c 'import json; print(json.load(open("release.json"))["source_release_sha256"])')
+          python3 ci/verify_image.py --image "$image_id" --manifest build-context/source-manifest.json --expected-release "$source_sha" --output verification/image-verification.json
+
+      - name: Publish the verified image
+        if: ${{ !inputs.verify_public }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(python3 -c 'import json; print(json.load(open("release.json"))["version"])')
+          registry_config=$(mktemp -d "$RUNNER_TEMP/ghcr.XXXXXX")
+          export DOCKER_CONFIG="$registry_config"
+          trap 'docker logout ghcr.io >/dev/null 2>&1 || true; rm -rf "$registry_config"' EXIT
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          docker tag "$IMAGE:$version" "$IMAGE:analyzer"
+          docker push "$IMAGE:$version"
+          docker push "$IMAGE:analyzer"
+          docker image inspect "$IMAGE:$version" --format '{{json .RepoDigests}}' > verification/published-digests.json
+
+      - name: Verify an anonymous pull on a clean runner
+        if: ${{ inputs.verify_public }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(python3 -c 'import json; print(json.load(open("release.json"))["version"])')
+          export DOCKER_CONFIG=$(mktemp -d "$RUNNER_TEMP/anonymous.XXXXXX")
+          trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+          docker pull "$IMAGE:$version"
+          image_digest=$(docker image inspect "$IMAGE:$version" --format '{{index .RepoDigests 0}}')
+          source_sha=$(python3 -c 'import json; print(json.load(open("release.json"))["source_release_sha256"])')
+          python3 ci/verify_image.py --image "$image_digest" --manifest build-context/source-manifest.json --expected-release "$source_sha" --output verification/anonymous-pull-verification.json
+
