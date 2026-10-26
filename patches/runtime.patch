@@ -4,7 +4,7 @@ diff --git a/app/build/index.html b/app/build/index.html
 @@ -1 +1 @@
 -<!doctype html><html lang="en"><head><meta charset="utf-8"/><link rel="icon" href="/favicon.ico"/><meta name="theme-color" content="#0e0e0e"/><meta name="description" content="GixRadar"/><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="GixRadar"><link rel="apple-touch-icon" href="/radar.png"/><link rel="manifest" href="/manifest.json"/><title>GixRadar</title><style>body,html{background-color:#0e0e0e}</style><script defer="defer" src="/static/js/gix-zones.js?v=5a283b356158"></script><script defer="defer" src="/static/js/main.747f18dd.js?follow=1&amp;zones=8eb56aff71ac"></script><link href="/static/css/main.257cb343.css" rel="stylesheet"><link rel="stylesheet" href="/static/css/gix-zones.css?v=2a4d20b3abc1"></head><body><noscript>You need to enable JavaScript to run this app.</noscript><div id="root"></div><div id="hidden-box"></div></body></html>
 \ No newline at end of file
-+<!doctype html><html lang="en"><head><meta charset="utf-8"/><link rel="icon" href="/favicon.ico"/><meta name="theme-color" content="#0e0e0e"/><meta name="description" content="GixRadar"/><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="GixRadar"><link rel="apple-touch-icon" href="/radar.png"/><link rel="manifest" href="/manifest.json"/><title>GixRadar</title><style>body,html{background-color:#0e0e0e}</style><script defer="defer" src="/static/js/gix-zones.js?v=cd45b270595b"></script><script defer="defer" src="/static/js/main.747f18dd.js?follow=1&amp;zones=fd7462ec0bd4"></script><link href="/static/css/main.257cb343.css" rel="stylesheet"><link rel="stylesheet" href="/static/css/gix-zones.css?v=c3a882a79c43"></head><body><noscript>You need to enable JavaScript to run this app.</noscript><div id="root"></div><div id="hidden-box"></div></body></html>
++<!doctype html><html lang="en"><head><meta charset="utf-8"/><link rel="icon" href="/favicon.ico"/><meta name="theme-color" content="#0e0e0e"/><meta name="description" content="GixRadar"/><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="GixRadar"><link rel="apple-touch-icon" href="/radar.png"/><link rel="manifest" href="/manifest.json"/><title>GixRadar</title><style>body,html{background-color:#0e0e0e}</style><script defer="defer" src="/static/js/gix-zones.js?v=d671a187fe12"></script><script defer="defer" src="/static/js/main.747f18dd.js?follow=1&amp;zones=fd7462ec0bd4"></script><link href="/static/css/main.257cb343.css" rel="stylesheet"><link rel="stylesheet" href="/static/css/gix-zones.css?v=c3a882a79c43"></head><body><noscript>You need to enable JavaScript to run this app.</noscript><div id="root"></div><div id="hidden-box"></div></body></html>
 \ No newline at end of file
 diff --git a/app/build/static/css/gix-zones.css b/app/build/static/css/gix-zones.css
 --- a/app/build/static/css/gix-zones.css
@@ -86,7 +86,44 @@ diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
          : '当前模式或阶段暂无可用预测';
        emit();
      } catch (error) {
-@@ -316,12 +343,13 @@
+@@ -246,11 +273,18 @@
+   }
+   function ingest(payload) {
+     // Original FileReader callbacks can finish after a socket has closed.
++    let receivedAt = now();
+     if (currentSocket) {
+       const received = payloadSources.get(payload);
+       if (socketInvalid || currentSocket.readyState !== 1 || !received || received.socket !== currentSocket ||
+           received.sequence < acceptedSequence || received.sequence === acceptedSequence && payload !== acceptedPayload) return;
+       acceptedSequence = received.sequence; acceptedPayload = payload;
++      // Decode completion after a background pause is not a new message.
++      receivedAt = received.receivedAt;
++      if (now() - receivedAt >= 10000) {
++        blockedPayload = payload;
++        return invalidate('waiting', '雷达数据已停止，预测已清除');
++      }
+     }
+     if (payload && payload === blockedPayload) return;
+     const newPayload = payload !== lastPayload;
+@@ -269,7 +303,7 @@
+     }
+     const next = { revision, mapId: map[0], worldSize: size, whiteCircle: white };
+     context = next; state = 'live'; message = '实时白圈已同步';
+-    if (newPayload) { lastDataAt = now(); armStaleCheck(); }
++    if (newPayload) { lastDataAt = receivedAt; armStaleCheck(); }
+     queueAutomatic();
+     emit();
+   }
+@@ -298,7 +332,7 @@
+     });
+     socket.addEventListener('message', event => {
+       if (currentSocket !== socket || !record(event)) return;
+-      const received = {socket, sequence: ++receivedSequence}; messageSources.set(event, received);
++      const received = {socket, sequence: ++receivedSequence, receivedAt: now()}; messageSources.set(event, received);
+       if (currentSocket === socket && event.data === 'PIN:ERROR') {
+         acceptedSequence = received.sequence; acceptedPayload = null;
+         authorized = false; resetAuthentication(); candidatePin = null; authorizedPin = null; autoBlocked = true; opened = false; opening = false;
+@@ -316,12 +350,13 @@
    }
    function predictedCircle(value, size) {
      if (!record(value) || !record(value.center) || !integer(value.phase) || value.phase < 1 || value.phase > 8 ||
@@ -102,7 +139,7 @@ diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
          !['auto', 'normal', 'competitive'].includes(value.match_type) ||
          !(value.current_phase === null || integer(value.current_phase) && value.current_phase >= 1 && value.current_phase <= 8) ||
          !(value.model_run_id === null || typeof value.model_run_id === 'string' && value.model_run_id.length > 0 && value.model_run_id.length <= 200) ||
-@@ -332,8 +360,7 @@
+@@ -332,8 +367,7 @@
      const final = value.final_circle === null ? null : predictedCircle(value.final_circle, size);
      if (value.next_circle !== null && !next || value.final_circle !== null && !final) return null;
      if (value.current_phase === null || value.current_phase === 8) return next || final ? null : { next, final };
@@ -112,7 +149,7 @@ diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
      return { next, final };
    }
    async function openSettings() {
-@@ -382,7 +409,7 @@
+@@ -382,7 +416,7 @@
        const h = React.createElement;
        return h(React.Fragment, null,
          h('div', { className: 'gix-zones-sr-only', role: 'status',
@@ -121,7 +158,7 @@ diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
            context ? autoStatus : '自动预测 · ' + message),
          h('button', { className: 'gix-zones-toggle', type: 'button', title: opening ? '正在连接，点击取消' : '圈型预测',
            'aria-label': opening ? '取消打开圈型预测' : '圈型预测', 'aria-expanded': opened, 'aria-busy': opening,
-@@ -396,11 +423,13 @@
+@@ -396,11 +430,13 @@
            h('section', { className: 'gix-zones-panel', role: 'dialog', 'aria-modal': true,
              'aria-label': '圈型预测' },
            h('header', { className: 'gix-zones-header' },
@@ -4027,7 +4064,7 @@ diff --git a/app/zones/web/index.html b/app/zones/web/index.html
 @@ -1,9 +1,9 @@
  <!doctype html>
 -<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=51aaa647d57f"><script defer src="/zones/settings.js?v=6b6d487fea36"></script></head>
-+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=c97345209f22"><script defer src="/zones/settings.js?v=a333a09dae55"></script></head>
++<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=c97345209f22"><script defer src="/zones/settings.js?v=1dbdbcefc1b0"></script></head>
  <body><main>
  <p id="connection" class="muted" role="status">正在读取圈型预测状态…</p>
 -<section><h1>Circle Analyzer / KNN</h1><label for="prediction-mode">对局模式</label><select id="prediction-mode" disabled><option value="auto">自动</option><option value="normal">普通匹配</option><option value="competitive">竞技排位</option></select><p id="mode-message" role="status"></p><p class="muted">自动模式无法区分圈型时，可手动选择实际对局模式。</p></section>
@@ -4136,3 +4173,11 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
    }
    function drainRefresh() {
      if (refreshPending && active && authorized && initialized && !document.hidden && !refreshing && !saving &&
+@@ -248,6 +266,7 @@
+     if (document.hidden) { resumePending = true; for (const controller of controllers) controller.abort(); }
+     else requestResume();
+   });
++  window.addEventListener('online', requestResume);
+   window.addEventListener('pagehide', () => {
+     active = false; resumePending = true; clearTimeout(timer); clearTimeout(authTimer); clearTimeout(reconcileTimer);
+     for (const controller of controllers) controller.abort();
