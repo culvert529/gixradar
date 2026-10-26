@@ -3909,7 +3909,7 @@ diff --git a/app/zones/web/index.html b/app/zones/web/index.html
 @@ -1,9 +1,9 @@
  <!doctype html>
 -<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=51aaa647d57f"><script defer src="/zones/settings.js?v=6b6d487fea36"></script></head>
-+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=51aaa647d57f"><script defer src="/zones/settings.js?v=a937b2863f51"></script></head>
++<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=c97345209f22"><script defer src="/zones/settings.js?v=a333a09dae55"></script></head>
  <body><main>
  <p id="connection" class="muted" role="status">正在读取圈型预测状态…</p>
 -<section><h1>Circle Analyzer / KNN</h1><label for="prediction-mode">对局模式</label><select id="prediction-mode" disabled><option value="auto">自动</option><option value="normal">普通匹配</option><option value="competitive">竞技排位</option></select><p id="mode-message" role="status"></p><p class="muted">自动模式无法区分圈型时，可手动选择实际对局模式。</p></section>
@@ -3919,6 +3919,16 @@ diff --git a/app/zones/web/index.html b/app/zones/web/index.html
 -<section><h2>可用 KNN 样本</h2><ul id="models"></ul><p class="notice">圈预测默认开启，按地图和对局模式使用 Circle Analyzer / KNN。各阶段至少需要 5 场独立比赛；样本不足时仅按可用校准估计，无法判断时暂不显示。圈样本数与独立比赛数分开统计，不代表预测准确率；实际圈型以游戏为准。</p></section>
 +<section><h2>原版模型与验证</h2><ul id="models"></ul><p class="notice">定时任务负责采集和训练，预测保留 Morse 原版的网格统计、选模与规则兜底。模型不可用时，原版仍可返回规则估计。留出指标用于了解历史表现，不代表实战准确率；实际圈型以游戏为准。</p></section>
  </main></body></html>
+diff --git a/app/zones/web/settings.css b/app/zones/web/settings.css
+--- a/app/zones/web/settings.css
++++ b/app/zones/web/settings.css
+@@ -1 +1,6 @@
+ :root{color-scheme:dark;font:14px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif;background:#10131c;color:#e7ecf1}*{box-sizing:border-box}body{margin:0;padding:20px}main{max-width:560px;margin:auto}section{border:1px solid #2c3441;border-radius:10px;padding:16px;margin-bottom:16px;background:#151b26}h1{font-size:17px;margin:0 0 8px}h2{font-size:14px;margin:0 0 12px}p{margin:8px 0}.muted{color:#a4b0c1;font-size:12px}label{display:block;font-size:12px;color:#b9c5d5;margin-bottom:6px}input,select{width:100%;padding:10px 12px;border:1px solid #3a475c;border-radius:6px;background:#0d121b;color:#edf4ff;font:inherit}button{margin-top:10px;padding:8px 16px;border:1px solid #5f8db6;border-radius:6px;background:#25415a;color:#f2f7ff;font:inherit;cursor:pointer}button:disabled{opacity:.5;cursor:default}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid #91c8ef;outline-offset:2px}dl{display:grid;grid-template-columns:auto 1fr;gap:8px 16px;margin:0}dt{color:#a4b0c1}dd{margin:0;text-align:right;overflow-wrap:anywhere}ul{list-style:none;padding:0;margin:10px 0 0}li{display:flex;gap:12px;justify-content:space-between;padding:7px 0;border-top:1px solid #2a3342}.notice{color:#cfb786;font-size:12px}.error{color:#ffbaa9}#message,#mode-message{min-height:1.6em;font-size:12px}[hidden]{display:none!important}@media(max-width:420px){body{padding:12px}section{padding:12px}dl{gap:7px 10px}}
++
++#models>li{display:grid;grid-template-columns:minmax(0,1fr);gap:3px;padding:10px 0}
++#models>li>span{min-width:0;overflow-wrap:anywhere}
++#models>li>span:first-child{font-weight:600}
++#models>li>span+span{font-size:12px;line-height:1.65;color:#a4b0c1;font-variant-numeric:tabular-nums}
 diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
 --- a/app/zones/web/settings.js
 +++ b/app/zones/web/settings.js
@@ -3967,23 +3977,35 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
      if (!active || version !== writeEpoch || sequence < appliedRead) return null;
      const changed = result.prediction_mode !== predictionMode;
      applySettings(result); appliedRead = sequence;
-@@ -165,20 +174,22 @@
+@@ -163,22 +172,31 @@
+     text('last-result', `检查 ${count(result.checked)} · 新增 ${count(result.inserted)} · 跳过 ${count(result.skipped)} · 失败 ${count(result.failed)}`);
+     text('updated', new Date().toLocaleTimeString());
      text('task-error', problem);
++    const available = new Map();
++    for (const model of Array.isArray(status.models) ? status.models.slice(0, 18) : []) {
++      if (!model || typeof model !== 'object' || Array.isArray(model) ||
++          !Object.prototype.hasOwnProperty.call(model, 'map_id') || typeof model.map_id !== 'string' ||
++          !Object.prototype.hasOwnProperty.call(mapNames, model.map_id) ||
++          !Object.prototype.hasOwnProperty.call(model, 'match_type') || model.match_type !== 'mixed' || available.has(model.map_id)) continue;
++      available.set(model.map_id, model);
++    }
      const models = byId('models'); models.replaceChildren();
-     for (const model of Array.isArray(status.models) ? status.models.slice(0, 18) : []) {
+-    for (const model of Array.isArray(status.models) ? status.models.slice(0, 18) : []) {
 -      if (!model || !Object.prototype.hasOwnProperty.call(mapNames, model.map_id) ||
 -          !['normal', 'competitive'].includes(model.match_type)) continue;
-+      if (!model || !Object.prototype.hasOwnProperty.call(mapNames, model.map_id) || model.match_type !== 'mixed') continue;
++    for (const [mapId, mapName] of Object.entries(mapNames)) {
++      const model = available.get(mapId);
        const item = document.createElement('li'), name = document.createElement('span'), detail = document.createElement('span');
 -      name.textContent = `${mapNames[model.map_id]} · ${modes[model.match_type]}`;
 -      detail.textContent = `${count(model.sample_count)} 条圈样本 / ${count(model.training_match_count)} 场独立比赛 · ${model.validation_available ? '有独立验证' : '尚无独立验证'}`;
-+      name.textContent = `${mapNames[model.map_id]} · 原版混合模式`;
-+      detail.textContent = `${count(model.sample_count)} 条可用样本 / ${count(model.training_match_count)} 场训练比赛 / ${count(model.validation_match_count)} 场验证比赛 · ${model.validation_available ? '有原版留出指标' : '暂无原版留出指标'}`;
++      name.textContent = mapName;
++      detail.textContent = model
++        ? `${count(model.sample_count)} 条可用样本 / ${count(model.training_match_count)} 场训练比赛 / ${count(model.validation_match_count)} 场验证比赛 · ${model.validation_available === true ? '有原版留出指标' : '暂无原版留出指标'}`
++        : '暂无可用原版统计模型';
        item.append(name, detail); models.append(item);
-     }
-     if (!models.childElementCount) {
+-    }
+-    if (!models.childElementCount) {
 -      const item = document.createElement('li'); item.textContent = '暂无可用 KNN 样本；仅使用已校准的圈型估计，无法判断时暂不显示。'; models.append(item);
-+      const item = document.createElement('li'); item.textContent = '尚无原版统计模型；可识别阶段时使用原版规则估计。'; models.append(item);
      }
    }
    function schedule() {
