@@ -222,3 +222,39 @@ diff --git a/app/zones/web/index.html b/app/zones/web/index.html
  <body><main>
  <p id="connection" class="muted" role="status">正在读取圈型预测状态…</p>
  <section><h1>Circle Analyzer / KNN</h1><label for="prediction-mode">对局模式</label><select id="prediction-mode" disabled><option value="auto">自动</option><option value="normal">普通匹配</option><option value="competitive">竞技排位</option></select><p id="mode-message" role="status"></p><p class="muted">自动模式无法区分圈型时，可手动选择实际对局模式。</p></section>
+diff --git a/app/zones/backend/app/services/config_service.py b/app/zones/backend/app/services/config_service.py
+--- a/app/zones/backend/app/services/config_service.py
++++ b/app/zones/backend/app/services/config_service.py
+@@ -1,12 +1,19 @@
+ from __future__ import annotations
+ 
++from copy import deepcopy
+ from dataclasses import dataclass
++from functools import lru_cache
+ from pathlib import Path
+ from typing import Any
+ 
+ import yaml
+ 
+ from app.core.errors import AppError
++
++
++@lru_cache(maxsize=8)
++def _parse_yaml(text: str) -> Any:
++    return yaml.safe_load(text)
+ 
+ 
+ @dataclass(frozen=True)
+@@ -40,7 +47,11 @@
+                 status_code=500,
+                 details={"path": str(path)},
+             )
+-        content = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
++        text = path.read_text(encoding="utf-8")
++        # Read every time; reuse only small, identical text and isolate callers.
++        parsed = (deepcopy(_parse_yaml(text)) if len(text.encode("utf-8")) <= 64 * 1024
++                  else yaml.safe_load(text))
++        content = parsed or {}
+         if not isinstance(content, dict):
+             raise AppError(
+                 code="CONFIG_INVALID",

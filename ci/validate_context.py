@@ -78,15 +78,17 @@ def clean_runtime(destination, release, root):
     added = set(after) - set(before)
     changed = {name for name in before.keys() & after.keys() if after[name] != before[name]}
     revision = release.get("runtime_revision", "cleanup1")
-    if revision not in {"cleanup1", "clock1", "profiles1", "settings1"}:
+    if revision not in {"cleanup1", "clock1", "profiles1", "settings1", "config1"}:
         raise ValueError("Unsupported runtime revision")
     reviewed_changes = {"app/zones/backend/app/core/config.py"}
-    if revision in {"clock1", "profiles1", "settings1"}:
+    if revision in {"clock1", "profiles1", "settings1", "config1"}:
         reviewed_changes |= {"app/build/static/js/gix-zones.js", "app/build/index.html"}
-    if revision in {"profiles1", "settings1"}:
+    if revision in {"profiles1", "settings1", "config1"}:
         reviewed_changes |= {"app/zones/backend/app/services/analyzer.py", "app/zones/backend/app/services/training.py"}
-    if revision == "settings1":
+    if revision in {"settings1", "config1"}:
         reviewed_changes |= {"app/zones/web/settings.js", "app/zones/web/index.html"}
+    if revision == "config1":
+        reviewed_changes |= {"app/zones/backend/app/services/config_service.py"}
     if (removed != {"app/zones/backend/app/db/repository.py"} or added or
             changed != reviewed_changes):
         raise ValueError("Runtime patch changed files outside the approved scope")
