@@ -25,6 +25,22 @@ from urllib.parse import urlsplit
 import uuid
 
 
+MORSE_ADDITIONS = frozenset({
+    "app/zones/backend/app/db/migrations/012_morse_native.sql",
+    "app/zones/backend/app/morse_native/__init__.py",
+    "app/zones/backend/app/morse_native/config/maps.yaml",
+    "app/zones/backend/app/morse_native/config/zone_phases.yaml",
+    "app/zones/backend/app/morse_native/config_service.py",
+    "app/zones/backend/app/morse_native/coordinates.py",
+    "app/zones/backend/app/morse_native/errors.py",
+    "app/zones/backend/app/morse_native/prediction.py",
+    "app/zones/backend/app/morse_native/repository.py",
+    "app/zones/backend/app/morse_native/training.py",
+    "app/zones/backend/app/morse_native/upstream.json",
+})
+MORSE_COMMIT = "d4a93564e4f7230be397f5c60bfe8d968931a178"
+
+
 class CheckFailed(Exception):
     pass
 
@@ -59,12 +75,19 @@ def verify_context(manifest_path, expected_release):
     need(manifest.get("source_release_sha256") == expected_release, "SOURCE_RELEASE_MISMATCH")
     installed, build = entries(manifest["files"]), entries(manifest["build_files"])
     revision = manifest.get("runtime_revision")
-    need(revision in {None, "cleanup1", "clock1", "profiles1", "settings1", "config1", "errors1", "accuracy1"}, "UNSUPPORTED_RUNTIME_REVISION")
-    app_count = 996 if revision in {"cleanup1", "clock1", "profiles1", "settings1", "config1", "errors1", "accuracy1"} else 997
+    need(revision in {None, "cleanup1", "clock1", "profiles1", "settings1", "config1", "errors1", "accuracy1", "morse1"}, "UNSUPPORTED_RUNTIME_REVISION")
+    app_count = 997 if revision is None else (1007 if revision == "morse1" else 996)
     need(len(installed) == app_count + 5 and len(build) == app_count + 31, "BASELINE_FILE_COUNTS")
     need(sum(n.startswith("app/") for n in installed) == app_count and
          sum(n.startswith("container/") for n in installed) == 5, "INSTALLED_ROOT_COUNTS")
     need(all(name in build and build[name] == item for name, item in installed.items()), "INSTALLED_NOT_IN_BUILD")
+    if revision == "morse1":
+        for rows in (manifest["files"], manifest["build_files"]):
+            need([item["path"] for item in rows[-len(MORSE_ADDITIONS):]] == sorted(MORSE_ADDITIONS),
+                 "MORSE_ADDITION_ORDER")
+        need({name for name in build if name.startswith("app/zones/backend/app/morse_native/")} ==
+             MORSE_ADDITIONS - {"app/zones/backend/app/db/migrations/012_morse_native.sql"},
+             "MORSE_NATIVE_INVENTORY")
     base = manifest_path.parent.resolve()
     actual = set()
     for directory in ("app", "container"):
@@ -177,15 +200,26 @@ def verify_http(client, manifest, mode, assets=False):
     for map_id, radius in (("taego", 63379.70703125), ("erangel", 192059.71875)):
         value = client.json("/api/zones/predict", body={"map_id": map_id,
             "current_circle_center": {"x": 408000, "y": 408000}, "current_radius": radius})
-        extra_keys = {"quality_policy"} if manifest.get("runtime_revision") == "accuracy1" else set()
-        if extra_keys:
+        revision = manifest.get("runtime_revision")
+        extra_keys = {"quality_policy"} if revision == "accuracy1" else set()
+        if revision == "accuracy1":
             need(value.get("quality_policy") == "chronological-relative-knn-v1", "PREDICTION_QUALITY_POLICY")
+        if revision == "morse1":
+            extra_keys = {"model_match_type", "prediction_policy", "parameter_policy", "upstream_commit"}
+            need(value.get("model_match_type") == "mixed" and
+                 value.get("prediction_policy") == "morse-original-d4a93564" and
+                 value.get("parameter_policy") == "observed-radii-v1" and
+                 value.get("upstream_commit") == MORSE_COMMIT, "PREDICTION_NATIVE_POLICY")
         need(set(value) == extra_keys | {"map_id", "current_phase", "next_circle", "final_circle", "model_run_id", "warnings",
                             "engine", "match_type", "geometry_policy"}, "PREDICTION_SCHEMA")
-        need(value["map_id"] == map_id and value["engine"] == "pubg_circle_analyzer_knn" and
-             value["geometry_policy"] == "nested-circles-v2" and value["match_type"] == mode and
+        engine = "morse_zone_predictor" if revision == "morse1" else "pubg_circle_analyzer_knn"
+        geometry = "morse-original-v1" if revision == "morse1" else "nested-circles-v2"
+        need(value["map_id"] == map_id and value["engine"] == engine and
+             value["geometry_policy"] == geometry and value["match_type"] == mode and
              all(value[k] is None for k in ("current_phase", "next_circle", "final_circle", "model_run_id")), "FRESH_PREDICTION")
-        need(value["warnings"] == ["phase_or_match_type_unresolved" if mode == "auto" else "phase_unresolved_from_observed_radii"], "FRESH_PREDICTION_WARNING")
+        warning = ("phase_or_match_type_unresolved" if mode == "auto" and revision != "morse1"
+                   else "phase_unresolved_from_observed_radii")
+        need(value["warnings"] == [warning], "FRESH_PREDICTION_WARNING")
     records = []
     if assets:
         catalog = entries(manifest["files"])

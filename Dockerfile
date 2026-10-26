@@ -10,6 +10,9 @@ COPY app/zones/web/index.html /app/zones/web/index.html
 COPY app/zones/backend/app/services/config_service.py /app/zones/backend/app/services/config_service.py
 COPY app/zones/backend/app/db/connection.py /app/zones/backend/app/db/connection.py
 COPY app/zones/backend/app/services/prediction.py /app/zones/backend/app/services/prediction.py
+COPY app/zones/backend/app/main.py /app/zones/backend/app/main.py
+COPY app/zones/backend/app/morse_native /app/zones/backend/app/morse_native
+COPY app/zones/backend/app/db/migrations/012_morse_native.sql /app/zones/backend/app/db/migrations/012_morse_native.sql
 COPY source-manifest.json /opt/gixradar-build.json
 
 ARG VERSION=analyzer

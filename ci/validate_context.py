@@ -8,6 +8,21 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 
+MORSE_ADDITIONS = frozenset({
+    "app/zones/backend/app/db/migrations/012_morse_native.sql",
+    "app/zones/backend/app/morse_native/__init__.py",
+    "app/zones/backend/app/morse_native/config/maps.yaml",
+    "app/zones/backend/app/morse_native/config/zone_phases.yaml",
+    "app/zones/backend/app/morse_native/config_service.py",
+    "app/zones/backend/app/morse_native/coordinates.py",
+    "app/zones/backend/app/morse_native/errors.py",
+    "app/zones/backend/app/morse_native/prediction.py",
+    "app/zones/backend/app/morse_native/repository.py",
+    "app/zones/backend/app/morse_native/training.py",
+    "app/zones/backend/app/morse_native/upstream.json",
+})
+
+
 def digest(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -78,26 +93,35 @@ def clean_runtime(destination, release, root):
     added = set(after) - set(before)
     changed = {name for name in before.keys() & after.keys() if after[name] != before[name]}
     revision = release.get("runtime_revision", "cleanup1")
-    if revision not in {"cleanup1", "clock1", "profiles1", "settings1", "config1", "errors1", "accuracy1"}:
+    if revision not in {"cleanup1", "clock1", "profiles1", "settings1", "config1", "errors1", "accuracy1", "morse1"}:
         raise ValueError("Unsupported runtime revision")
     reviewed_changes = {"app/zones/backend/app/core/config.py"}
-    if revision in {"clock1", "profiles1", "settings1", "config1", "errors1", "accuracy1"}:
+    if revision in {"clock1", "profiles1", "settings1", "config1", "errors1", "accuracy1", "morse1"}:
         reviewed_changes |= {"app/build/static/js/gix-zones.js", "app/build/index.html"}
-    if revision in {"profiles1", "settings1", "config1", "errors1", "accuracy1"}:
+    if revision in {"profiles1", "settings1", "config1", "errors1", "accuracy1", "morse1"}:
         reviewed_changes |= {"app/zones/backend/app/services/analyzer.py", "app/zones/backend/app/services/training.py"}
-    if revision in {"settings1", "config1", "errors1", "accuracy1"}:
+    if revision in {"settings1", "config1", "errors1", "accuracy1", "morse1"}:
         reviewed_changes |= {"app/zones/web/settings.js", "app/zones/web/index.html"}
-    if revision in {"config1", "errors1", "accuracy1"}:
+    if revision in {"config1", "errors1", "accuracy1", "morse1"}:
         reviewed_changes |= {"app/zones/backend/app/services/config_service.py"}
-    if revision in {"errors1", "accuracy1"}:
+    if revision in {"errors1", "accuracy1", "morse1"}:
         reviewed_changes |= {"app/zones/backend/app/db/connection.py"}
-    if revision == "accuracy1":
+    if revision in {"accuracy1", "morse1"}:
         reviewed_changes |= {"app/zones/backend/app/services/prediction.py"}
-    if (removed != {"app/zones/backend/app/db/repository.py"} or added or
+    if revision == "morse1":
+        reviewed_changes |= {"app/zones/backend/app/main.py"}
+    reviewed_additions = MORSE_ADDITIONS if revision == "morse1" else frozenset()
+    if (removed != {"app/zones/backend/app/db/repository.py"} or added != reviewed_additions or
             changed != reviewed_changes):
         raise ValueError("Runtime patch changed files outside the approved scope")
     for key in ("files", "build_files"):
         manifest[key] = [after[entry["path"]] for entry in manifest[key] if entry["path"] in after]
+        manifest[key].extend(after[name] for name in sorted(reviewed_additions))
+    app_count = 1007 if revision == "morse1" else 996
+    if (sum(name.startswith("app/") for name in after) != app_count or
+            len(manifest["files"]) != app_count + 5 or len(manifest["build_files"]) != app_count + 31 or
+            len(after) != app_count + 31):
+        raise ValueError("Cleaned runtime inventory mismatch")
     manifest.update(runtime_revision=revision, cleanup_sha256=release["cleanup_sha256"])
     data = (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode()
     if digest(data) != release["runtime_manifest_sha256"]:
