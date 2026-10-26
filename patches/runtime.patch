@@ -84,3 +84,37 @@ index 514f46898140ef0ed0bb332d966dc478c782bf7c..6add49caa260a169b37bd68adf887faa
      prediction_mode: Literal["auto", "normal", "competitive"] = "auto"
      config_dir: Path = Field(default=PROJECT_ROOT / "config", alias="APP_CONFIG_DIR")
      data_dir: Path = Field(default=DEFAULT_DATA_DIR, alias="APP_DATA_DIR")
+diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
+index a0cf13bee1935ca7e3d7fdc0d18aec881c669d1b..04dd34fd7f0e699e76f9b435ba72ddd0a58d14ad 100644
+--- a/app/build/static/js/gix-zones.js
++++ b/app/build/static/js/gix-zones.js
+@@ -32,7 +32,10 @@
+   let autoRunning = false, autoPrediction = null, nextAutoAt = 0, lastAutoStarted = -Infinity;
+   let lastAutoSuccess = -Infinity, autoFailures = 0, autoBlocked = false;
+   let autoStatus = '等待雷达登录', autoPhase = null, lastDataAt = 0, staleTimer = null;
+-  const now = () => root.Date ? root.Date.now() : Date.now();
++  const wallNow = () => root.Date ? root.Date.now() : Date.now();
++  // Throttles, retries and stale-data checks must survive system clock changes.
++  const now = root.performance && typeof root.performance.now === 'function'
++    ? () => root.performance.now() : wallNow;
+   const later = (callback, delay) => root.setTimeout(callback, delay);
+   function emit() { for (const listener of listeners) { try { listener(); } catch (_) {} } }
+   function setPin(value) {
+@@ -204,7 +207,7 @@
+       const source = [result.next_circle, result.final_circle].some(value => value && value.source === 'analyzer_knn') ? 'analyzer_knn' : 'rule_baseline';
+       autoPrediction = safe.next || safe.final ? { owner: 'auto', revision: snapshot.revision, mapId: snapshot.mapId,
+         worldSize: snapshot.worldSize, result: safe, phase: result.current_phase, source,
+-        generatedAt: now() } : null;
++        generatedAt: wallNow() } : null;
+       prediction = autoPrediction;
+       lastAutoSuccess = now(); nextAutoAt = now() + 30000; autoFailures = 0;
+       autoStatus = prediction ? '自动预测 · Circle Analyzer / ' + (source === 'analyzer_knn' ? 'KNN' : '规则估计')
+diff --git a/app/build/index.html b/app/build/index.html
+index 21a14f07569b465b9cc503e3fda7a50d8db5a738..ac0efa89b2b981e421ef02f83810d1a2d0b50768 100644
+--- a/app/build/index.html
++++ b/app/build/index.html
+@@ -1 +1 @@
+-<!doctype html><html lang="en"><head><meta charset="utf-8"/><link rel="icon" href="/favicon.ico"/><meta name="theme-color" content="#0e0e0e"/><meta name="description" content="GixRadar"/><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="GixRadar"><link rel="apple-touch-icon" href="/radar.png"/><link rel="manifest" href="/manifest.json"/><title>GixRadar</title><style>body,html{background-color:#0e0e0e}</style><script defer="defer" src="/static/js/gix-zones.js?v=5a283b356158"></script><script defer="defer" src="/static/js/main.747f18dd.js?follow=1&amp;zones=8eb56aff71ac"></script><link href="/static/css/main.257cb343.css" rel="stylesheet"><link rel="stylesheet" href="/static/css/gix-zones.css?v=2a4d20b3abc1"></head><body><noscript>You need to enable JavaScript to run this app.</noscript><div id="root"></div><div id="hidden-box"></div></body></html>
+\ No newline at end of file
++<!doctype html><html lang="en"><head><meta charset="utf-8"/><link rel="icon" href="/favicon.ico"/><meta name="theme-color" content="#0e0e0e"/><meta name="description" content="GixRadar"/><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="GixRadar"><link rel="apple-touch-icon" href="/radar.png"/><link rel="manifest" href="/manifest.json"/><title>GixRadar</title><style>body,html{background-color:#0e0e0e}</style><script defer="defer" src="/static/js/gix-zones.js?v=536528988bf1"></script><script defer="defer" src="/static/js/main.747f18dd.js?follow=1&amp;zones=8eb56aff71ac"></script><link href="/static/css/main.257cb343.css" rel="stylesheet"><link rel="stylesheet" href="/static/css/gix-zones.css?v=2a4d20b3abc1"></head><body><noscript>You need to enable JavaScript to run this app.</noscript><div id="root"></div><div id="hidden-box"></div></body></html>
+\ No newline at end of file

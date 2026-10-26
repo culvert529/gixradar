@@ -58,7 +58,9 @@ def verify_context(manifest_path, expected_release):
     manifest = json.loads(raw)
     need(manifest.get("source_release_sha256") == expected_release, "SOURCE_RELEASE_MISMATCH")
     installed, build = entries(manifest["files"]), entries(manifest["build_files"])
-    app_count = 996 if manifest.get("runtime_revision") == "cleanup1" else 997
+    revision = manifest.get("runtime_revision")
+    need(revision in {None, "cleanup1", "clock1"}, "UNSUPPORTED_RUNTIME_REVISION")
+    app_count = 996 if revision in {"cleanup1", "clock1"} else 997
     need(len(installed) == app_count + 5 and len(build) == app_count + 31, "BASELINE_FILE_COUNTS")
     need(sum(n.startswith("app/") for n in installed) == app_count and
          sum(n.startswith("container/") for n in installed) == 5, "INSTALLED_ROOT_COUNTS")

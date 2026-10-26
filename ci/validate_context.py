@@ -52,7 +52,7 @@ def validate(archive, release, destination):
 
 
 def clean_runtime(destination, release, root):
-    """Apply the reviewed cleanup and authenticate the complete resulting tree."""
+    """Apply the reviewed runtime patch and authenticate the complete resulting tree."""
     destination, root = destination.resolve(), root.resolve()
     patch = root / "patches/runtime.patch"
     if digest(patch.read_bytes()) != release["cleanup_sha256"]:
@@ -77,17 +77,23 @@ def clean_runtime(destination, release, root):
     removed = set(before) - set(after)
     added = set(after) - set(before)
     changed = {name for name in before.keys() & after.keys() if after[name] != before[name]}
+    revision = release.get("runtime_revision", "cleanup1")
+    if revision not in {"cleanup1", "clock1"}:
+        raise ValueError("Unsupported runtime revision")
+    reviewed_changes = {"app/zones/backend/app/core/config.py"}
+    if revision == "clock1":
+        reviewed_changes |= {"app/build/static/js/gix-zones.js", "app/build/index.html"}
     if (removed != {"app/zones/backend/app/db/repository.py"} or added or
-            changed != {"app/zones/backend/app/core/config.py"}):
-        raise ValueError("Cleanup changed files outside the approved scope")
+            changed != reviewed_changes):
+        raise ValueError("Runtime patch changed files outside the approved scope")
     for key in ("files", "build_files"):
         manifest[key] = [after[entry["path"]] for entry in manifest[key] if entry["path"] in after]
-    manifest.update(runtime_revision="cleanup1", cleanup_sha256=release["cleanup_sha256"])
+    manifest.update(runtime_revision=revision, cleanup_sha256=release["cleanup_sha256"])
     data = (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode()
     if digest(data) != release["runtime_manifest_sha256"]:
         raise ValueError("Cleaned runtime manifest mismatch")
     manifest_path.write_bytes(data)
-    return {"runtime_revision": "cleanup1", "runtime_manifest_sha256": digest(data),
+    return {"runtime_revision": revision, "runtime_manifest_sha256": digest(data),
             "app_files": sum(name.startswith("app/") for name in after),
             "runtime_files": len(manifest["files"]), "build_files": len(after)}
 
