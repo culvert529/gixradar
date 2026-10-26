@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "version": "2.5.1-profiles1",
+  "version": "2.5.1-settings1",
   "source_release_sha256": "d5732fecf94c06eae05c0221347a29c24cf9aeb9a1c864f4e3a382cdb0956014",
   "release_tag": "source-d5732fecf94c",
   "asset_name": "gixradar-image-context.zip",
@@ -10,7 +10,7 @@
   "app_files": 997,
   "runtime_files": 1002,
   "build_files": 1028,
-  "cleanup_sha256": "598c3accf35b67120c1679b1b295953e6dcea9f0f8704ba94b63147551fe9a0b",
-  "runtime_manifest_sha256": "f009834386292131ee6ea29d84db0e6edaf561ad3458f10c7eda5ebd78884fef",
-  "runtime_revision": "profiles1"
+  "cleanup_sha256": "b03c5847091a46695e41cecce0f3c309a37ef56751e37d9031a00b0e09286cd0",
+  "runtime_manifest_sha256": "e6987f91f73ebf7fb8315bccbef1927a1a6003edca9b81a3ee5d54c54686ee9c",
+  "runtime_revision": "settings1"
 }

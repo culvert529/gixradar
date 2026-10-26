@@ -166,3 +166,59 @@ index 50d522195a2ae418d3444670b06ef568fa563e2c..4a7b6fcb3da1066dd58a0933d67938e3
          if state and state["dataset_fingerprint"] == data["dataset_fingerprint"] and existing:
              return existing.payload["id"]
          data["metrics"] = validate_buckets(data, self.cancel)
+diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
+--- a/app/zones/web/settings.js
++++ b/app/zones/web/settings.js
+@@ -77,23 +77,27 @@
+   async function resumeWhenReady() {
+     if (!resumePending || !active || document.hidden || resuming || initializing || refreshing || saving || reconciling) return;
+     resumePending = false; resuming = true;
++    let retryLater = false;
+     try {
+       if (!initialized || !authorized) {
+         initFailures = 0; authAttempts = 0; authRequested = false;
+         await initialize();
+       } else {
+         if (pendingMode) { pendingMode.attempts = 0; await reconcileMode(); }
+-        else await readSettings(writeEpoch, true);
++        else if (!await readSettings(writeEpoch, true)) resumePending = true;
+         await refresh();
+       }
+     } catch (error) {
+       if (!active || document.hidden) return;
+       if (error.status === 401 || error.status === 403) sessionRequired();
+-      else text('connection', '设置暂不可用，切回页面后会继续同步。');
++      else {
++        resumePending = true; retryLater = true;
++        text('connection', '设置暂不可用，稍后自动同步。');
++      }
+     } finally {
+       resuming = false;
+       if (initialized && authorized) schedule();
+-      void resumeWhenReady();
++      if (!retryLater) void resumeWhenReady();
+       drainRefresh();
+     }
+   }
+@@ -178,7 +182,10 @@
+   }
+   function schedule() {
+     clearTimeout(timer);
+-    if (active && authorized && initialized && !document.hidden) timer = setTimeout(refresh, 5000);
++    if (active && authorized && initialized && !document.hidden) timer = setTimeout(() => {
++      if (resumePending) void resumeWhenReady();
++      else void refresh();
++    }, 5000);
+   }
+   function drainRefresh() {
+     if (refreshPending && active && authorized && initialized && !document.hidden && !refreshing && !saving &&
+diff --git a/app/zones/web/index.html b/app/zones/web/index.html
+--- a/app/zones/web/index.html
++++ b/app/zones/web/index.html
+@@ -1,5 +1,5 @@
+ <!doctype html>
+-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=51aaa647d57f"><script defer src="/zones/settings.js?v=6b6d487fea36"></script></head>
++<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=51aaa647d57f"><script defer src="/zones/settings.js?v=93356b580f6c"></script></head>
+ <body><main>
+ <p id="connection" class="muted" role="status">正在读取圈型预测状态…</p>
+ <section><h1>Circle Analyzer / KNN</h1><label for="prediction-mode">对局模式</label><select id="prediction-mode" disabled><option value="auto">自动</option><option value="normal">普通匹配</option><option value="competitive">竞技排位</option></select><p id="mode-message" role="status"></p><p class="muted">自动模式无法区分圈型时，可手动选择实际对局模式。</p></section>
