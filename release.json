@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "version": "2.5.1-morse10",
+  "version": "2.5.1-morse11",
   "source_release_sha256": "d5732fecf94c06eae05c0221347a29c24cf9aeb9a1c864f4e3a382cdb0956014",
   "release_tag": "source-d5732fecf94c",
   "asset_name": "gixradar-image-context.zip",
@@ -10,7 +10,7 @@
   "app_files": 997,
   "runtime_files": 1002,
   "build_files": 1028,
-  "cleanup_sha256": "bb1d04eec4d9cbbd6a3e2b08f41ee36ee650406b8b32c21d9f61faf4bf9471d8",
-  "runtime_manifest_sha256": "ee05b4bfb28da4384903fb33d6f6d3f228af77b295441b42b565d1780068c1cb",
+  "cleanup_sha256": "8d2ed8186a134da08ccfe3de57fc8d9c4a40fa5e98235b00a1f573d727db9b19",
+  "runtime_manifest_sha256": "b8697ba52676edfdcdb796c9f43a5191d6b2d89a3d5de9b8bada8f7161e86156",
   "runtime_revision": "morse6"
 }

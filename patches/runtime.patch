@@ -3386,6 +3386,18 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
              client=self.client
              self.next_run_at=self.clock() if self.settings.pubg_api_key else None
              self._scheduled_at=self.next_run_at
+@@ -299,9 +307,9 @@
+         except Cancelled:
+             cancelled=True
+         except AppError as exc:
+-            error=exc.code
++            error=preferred_error(error,exc.code)
+         except Exception:
+-            error="COLLECTOR_INTERNAL_ERROR"
++            error=preferred_error(error,"COLLECTOR_INTERNAL_ERROR")
+         finally:
+             if started:
+                 with self.guard:
 @@ -467,10 +475,12 @@
      def status(self):
          with self.guard:
