@@ -4,7 +4,7 @@ diff --git a/app/build/index.html b/app/build/index.html
 @@ -1 +1 @@
 -<!doctype html><html lang="en"><head><meta charset="utf-8"/><link rel="icon" href="/favicon.ico"/><meta name="theme-color" content="#0e0e0e"/><meta name="description" content="GixRadar"/><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="GixRadar"><link rel="apple-touch-icon" href="/radar.png"/><link rel="manifest" href="/manifest.json"/><title>GixRadar</title><style>body,html{background-color:#0e0e0e}</style><script defer="defer" src="/static/js/gix-zones.js?v=5a283b356158"></script><script defer="defer" src="/static/js/main.747f18dd.js?follow=1&amp;zones=8eb56aff71ac"></script><link href="/static/css/main.257cb343.css" rel="stylesheet"><link rel="stylesheet" href="/static/css/gix-zones.css?v=2a4d20b3abc1"></head><body><noscript>You need to enable JavaScript to run this app.</noscript><div id="root"></div><div id="hidden-box"></div></body></html>
 \ No newline at end of file
-+<!doctype html><html lang="en"><head><meta charset="utf-8"/><link rel="icon" href="/favicon.ico"/><meta name="theme-color" content="#0e0e0e"/><meta name="description" content="GixRadar"/><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="GixRadar"><link rel="apple-touch-icon" href="/radar.png"/><link rel="manifest" href="/manifest.json"/><title>GixRadar</title><style>body,html{background-color:#0e0e0e}</style><script defer="defer" src="/static/js/gix-zones.js?v=60a3f839b3b1"></script><script defer="defer" src="/static/js/main.747f18dd.js?follow=1&amp;zones=fd7462ec0bd4"></script><link href="/static/css/main.257cb343.css" rel="stylesheet"><link rel="stylesheet" href="/static/css/gix-zones.css?v=c3a882a79c43"></head><body><noscript>You need to enable JavaScript to run this app.</noscript><div id="root"></div><div id="hidden-box"></div></body></html>
++<!doctype html><html lang="en"><head><meta charset="utf-8"/><link rel="icon" href="/favicon.ico"/><meta name="theme-color" content="#0e0e0e"/><meta name="description" content="GixRadar"/><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="GixRadar"><link rel="apple-touch-icon" href="/radar.png"/><link rel="manifest" href="/manifest.json"/><title>GixRadar</title><style>body,html{background-color:#0e0e0e}</style><script defer="defer" src="/static/js/gix-zones.js?v=10e4d27cdb3b"></script><script defer="defer" src="/static/js/main.747f18dd.js?follow=1&amp;zones=fd7462ec0bd4"></script><link href="/static/css/main.257cb343.css" rel="stylesheet"><link rel="stylesheet" href="/static/css/gix-zones.css?v=c3a882a79c43"></head><body><noscript>You need to enable JavaScript to run this app.</noscript><div id="root"></div><div id="hidden-box"></div></body></html>
 \ No newline at end of file
 diff --git a/app/build/static/css/gix-zones.css b/app/build/static/css/gix-zones.css
 --- a/app/build/static/css/gix-zones.css
@@ -18,11 +18,13 @@ diff --git a/app/build/static/css/gix-zones.css b/app/build/static/css/gix-zones
 diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
 --- a/app/build/static/js/gix-zones.js
 +++ b/app/build/static/js/gix-zones.js
-@@ -25,14 +25,17 @@
+@@ -24,15 +24,18 @@
+   let React, context = null, prediction = null, signature = null, revision = 0;
    let lastPayload = null, blockedPayload = null;
    let currentSocket = null, socketInvalid = false, state = 'waiting', message = '等待雷达数据';
-   let opened = false, opening = false, panelError = '';
+-  let opened = false, opening = false, panelError = '';
 -  let panelIntent = 0, settingsFrame = null, toggleButton = null;
++  let opened = false, opening = false, panelError = '', panelAwaitingAuth = false;
 +  let panelIntent = 0, settingsFrame = null, toggleButton = null, closeButton = null;
    let candidatePin = null, authorizedPin = null, authorized = false, sessionReady = false, loginAttempted = false;
    let authEpoch = 0, authPromise = null, authController = null;
@@ -137,7 +139,7 @@ diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
      }
      if (payload && payload === blockedPayload) return;
      const newPayload = payload !== lastPayload;
-@@ -269,7 +309,7 @@
+@@ -269,13 +309,16 @@
      }
      const next = { revision, mapId: map[0], worldSize: size, whiteCircle: white };
      context = next; state = 'live'; message = '实时白圈已同步';
@@ -146,7 +148,28 @@ diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
      queueAutomatic();
      emit();
    }
-@@ -298,7 +338,7 @@
+   function setView(payload) { ingest(payload); }
+   function watchSocket(socket) {
+     if (!socket || socket === currentSocket || typeof socket.addEventListener !== 'function') return;
++    if (opened || opening || panelAwaitingAuth) {
++      panelIntent += 1; opened = true; opening = false; panelError = ''; panelAwaitingAuth = true;
++    }
+     currentSocket = socket; socketInvalid = false; blockedPayload = lastPayload;
+     acceptedSequence = 0; acceptedPayload = null;
+     let receivedSequence = 0;
+@@ -288,20 +331,20 @@
+     });
+     socket.addEventListener('close', () => {
+       if (currentSocket !== socket) return;
+-      authorized = false; resetAuthentication(); candidatePin = null; authorizedPin = null; opened = false; opening = false;
++      authorized = false; resetAuthentication(); candidatePin = null; authorizedPin = null; opened = false; opening = false; panelAwaitingAuth = false;
+       socketInvalid = true; blockedPayload = lastPayload; invalidate('disconnected', '雷达已断线，预测已清除');
+     });
+     socket.addEventListener('error', () => {
+       if (currentSocket !== socket) return;
+-      authorized = false; resetAuthentication(); candidatePin = null; authorizedPin = null; opened = false; opening = false;
++      authorized = false; resetAuthentication(); candidatePin = null; authorizedPin = null; opened = false; opening = false; panelAwaitingAuth = false;
+       socketInvalid = true; blockedPayload = lastPayload; invalidate('disconnected', '雷达连接异常');
      });
      socket.addEventListener('message', event => {
        if (currentSocket !== socket || !record(event)) return;
@@ -154,8 +177,19 @@ diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
 +      const received = {socket, sequence: ++receivedSequence, receivedAt: now()}; messageSources.set(event, received);
        if (currentSocket === socket && event.data === 'PIN:ERROR') {
          acceptedSequence = received.sequence; acceptedPayload = null;
-         authorized = false; resetAuthentication(); candidatePin = null; authorizedPin = null; autoBlocked = true; opened = false; opening = false;
-@@ -316,12 +356,13 @@
+-        authorized = false; resetAuthentication(); candidatePin = null; authorizedPin = null; autoBlocked = true; opened = false; opening = false;
++        authorized = false; resetAuthentication(); candidatePin = null; authorizedPin = null; autoBlocked = true; opened = false; opening = false; panelAwaitingAuth = false;
+         socketInvalid = true; blockedPayload = lastPayload; invalidate('disconnected', '雷达尚未通过鉴权');
+       }
+       if (currentSocket === socket && event.data === 'PIN:OK') {
+@@ -310,18 +353,19 @@
+         authorizedPin = candidatePin || authorizedPin;
+         if (!authorizedPin) { try { authorizedPin = root.localStorage && root.localStorage.getItem('pin'); } catch (_) {} }
+         socketInvalid = false; authorized = true; autoBlocked = false;
+-        nextAutoAt = 0; queueAutomatic();
++        nextAutoAt = 0; queueAutomatic(); resumePanelAfterAuth();
+       }
+     });
    }
    function predictedCircle(value, size) {
      if (!record(value) || !record(value.center) || !integer(value.phase) || value.phase < 1 || value.phase > 8 ||
@@ -171,7 +205,7 @@ diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
          !['auto', 'normal', 'competitive'].includes(value.match_type) ||
          !(value.current_phase === null || integer(value.current_phase) && value.current_phase >= 1 && value.current_phase <= 8) ||
          !(value.model_run_id === null || typeof value.model_run_id === 'string' && value.model_run_id.length > 0 && value.model_run_id.length <= 200) ||
-@@ -332,8 +373,7 @@
+@@ -332,14 +376,18 @@
      const final = value.final_circle === null ? null : predictedCircle(value.final_circle, size);
      if (value.next_circle !== null && !next || value.final_circle !== null && !final) return null;
      if (value.current_phase === null || value.current_phase === 8) return next || final ? null : { next, final };
@@ -179,9 +213,44 @@ diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
 -        value.match_type === 'auto' && [value.next_circle, value.final_circle].some(item => item && item.source === 'analyzer_knn')) return null;
 +    if (next && value.next_circle.phase !== value.current_phase + 1 || final && value.final_circle.phase !== 8) return null;
      return { next, final };
++  }
++  function resumePanelAfterAuth() {
++    if (!panelAwaitingAuth || opening || !authorized || socketInvalid || currentSocket && currentSocket.readyState !== 1) return;
++    panelAwaitingAuth = false;
++    void openSettings();
    }
    async function openSettings() {
-@@ -382,7 +422,7 @@
+     if (opening) return;
+     const intent = ++panelIntent;
+-    opening = true; panelError = ''; emit();
++    opening = true; panelError = ''; panelAwaitingAuth = !authorized && !socketInvalid; emit();
+     const epoch = authEpoch;
+     try {
+       await ensureSession({verify: true});
+@@ -347,15 +395,19 @@
+       opened = true;
+     } catch (error) {
+       if (intent !== panelIntent || epoch !== authEpoch) return;
+-      panelError = error && (error.status === 401 || error.status === 403)
++      panelError = error && error.status === 403 && authorized
++        ? '雷达已连接，但圈型预测会话被拒绝，请检查访问地址或代理配置后重试。'
++        : error && error.status === 401 && authorized
++        ? '雷达已连接，但圈型预测会话尚未建立，请重新连接雷达后再试。'
++        : error && (error.status === 401 || error.status === 403)
+         ? '请先使用雷达原有 PIN 连接，再打开圈型预测。'
+         : '圈型预测服务暂不可用，请稍后再试。';
+       opened = true;
+-    } finally { if (intent === panelIntent) opening = false; emit(); }
++    } finally { if (intent === panelIntent) opening = false; emit(); resumePanelAfterAuth(); }
+   }
+   function setOpen(value) {
+     if (value) { void openSettings(); return; }
+-    panelIntent += 1; opened = false; opening = false; panelError = ''; emit();
++    panelIntent += 1; opened = false; opening = false; panelError = ''; panelAwaitingAuth = false; emit();
+     if (toggleButton && toggleButton.isConnected !== false && typeof toggleButton.focus === 'function') toggleButton.focus();
+   }
+   function useUpdates() {
+@@ -382,7 +434,7 @@
        const h = React.createElement;
        return h(React.Fragment, null,
          h('div', { className: 'gix-zones-sr-only', role: 'status',
@@ -190,7 +259,7 @@ diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
            context ? autoStatus : '自动预测 · ' + message),
          h('button', { className: 'gix-zones-toggle', type: 'button', title: opening ? '正在连接，点击取消' : '圈型预测',
            'aria-label': opening ? '取消打开圈型预测' : '圈型预测', 'aria-expanded': opened, 'aria-busy': opening,
-@@ -396,18 +436,20 @@
+@@ -396,18 +448,22 @@
            h('section', { className: 'gix-zones-panel', role: 'dialog', 'aria-modal': true,
              'aria-label': '圈型预测' },
            h('header', { className: 'gix-zones-header' },
@@ -198,9 +267,12 @@ diff --git a/app/build/static/js/gix-zones.js b/app/build/static/js/gix-zones.js
              h('strong', null, '圈型预测'),
              h('button', { className: 'gix-zones-close', type: 'button', 'aria-label': '关闭圈型预测',
 -              onClick: () => setOpen(false) }, '×')),
-+              onClick: () => setOpen(false), ref: bindCloseButton }, '×')),
-           panelError ? h('p', { className: 'gix-zones-panel-error', role: 'alert' }, panelError)
+-          panelError ? h('p', { className: 'gix-zones-panel-error', role: 'alert' }, panelError)
 -            : h('iframe', { className: 'gix-zones-frame', title: '圈型预测设置和采集状态', src: '/zones/', ref: bindSettingsFrame }))) : null);
++              onClick: () => setOpen(false), ref: bindCloseButton }, '×')),
++          opening || panelAwaitingAuth ? h('p', { className: 'gix-zones-panel-error', role: 'status' },
++            opening ? '正在验证雷达登录会话…' : '正在等待雷达原有 PIN 连接…')
++            : panelError ? h('p', { className: 'gix-zones-panel-error', role: 'alert' }, panelError)
 +            : h('iframe', { className: 'gix-zones-frame', title: '圈型预测设置和采集状态', src: '/zones/', ref: bindSettingsFrame }),
 +          h('span', { className: 'gix-zones-sr-only', tabIndex: 0, onFocus: focusCloseButton }))) : null);
      },
