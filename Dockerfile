@@ -8,6 +8,7 @@ COPY app/build/static/js/gix-zones.js /app/build/static/js/gix-zones.js
 COPY app/zones/backend/app/core/config.py /app/zones/backend/app/core/config.py
 COPY app/zones/backend/app/services/analyzer.py /app/zones/backend/app/services/analyzer.py
 COPY app/zones/backend/app/services/training.py /app/zones/backend/app/services/training.py
+COPY app/zones/backend/app/services/quality.py /app/zones/backend/app/services/quality.py
 COPY app/zones/backend/app/services/collector.py /app/zones/backend/app/services/collector.py
 COPY app/zones/backend/app/services/pubg_api.py /app/zones/backend/app/services/pubg_api.py
 COPY app/zones/web/settings.js /app/zones/web/settings.js
@@ -19,6 +20,7 @@ COPY app/zones/backend/app/services/prediction.py /app/zones/backend/app/service
 COPY app/zones/backend/app/main.py /app/zones/backend/app/main.py
 COPY app/zones/backend/app/morse_native /app/zones/backend/app/morse_native
 COPY app/zones/backend/app/db/migrations/012_morse_native.sql /app/zones/backend/app/db/migrations/012_morse_native.sql
+COPY app/zones/backend/app/db/migrations/013_model_quality.sql /app/zones/backend/app/db/migrations/013_model_quality.sql
 COPY source-manifest.json /opt/gixradar-build.json
 
 ARG VERSION=analyzer

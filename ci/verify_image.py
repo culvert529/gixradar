@@ -38,6 +38,11 @@ MORSE_ADDITIONS = frozenset({
     "app/zones/backend/app/morse_native/training.py",
     "app/zones/backend/app/morse_native/upstream.json",
 })
+
+QUALITY_ADDITIONS = frozenset({
+    "app/zones/backend/app/services/quality.py",
+    "app/zones/backend/app/db/migrations/013_model_quality.sql",
+})
 MORSE_COMMIT = "d4a93564e4f7230be397f5c60bfe8d968931a178"
 
 
@@ -75,15 +80,16 @@ def verify_context(manifest_path, expected_release):
     need(manifest.get("source_release_sha256") == expected_release, "SOURCE_RELEASE_MISMATCH")
     installed, build = entries(manifest["files"]), entries(manifest["build_files"])
     revision = manifest.get("runtime_revision")
-    need(revision in {None, "cleanup1", "clock1", "profiles1", "settings1", "config1", "errors1", "accuracy1", "morse1", "morse3", "morse4", "morse6"}, "UNSUPPORTED_RUNTIME_REVISION")
-    app_count = 997 if revision is None else (1007 if revision in {"morse1", "morse3", "morse4", "morse6"} else 996)
+    need(revision in {None, "cleanup1", "clock1", "profiles1", "settings1", "config1", "errors1", "accuracy1", "morse1", "morse3", "morse4", "morse6", "morse7"}, "UNSUPPORTED_RUNTIME_REVISION")
+    app_count = 997 if revision is None else (1009 if revision == "morse7" else (1007 if revision in {"morse1", "morse3", "morse4", "morse6"} else 996))
     need(len(installed) == app_count + 5 and len(build) == app_count + 31, "BASELINE_FILE_COUNTS")
     need(sum(n.startswith("app/") for n in installed) == app_count and
          sum(n.startswith("container/") for n in installed) == 5, "INSTALLED_ROOT_COUNTS")
     need(all(name in build and build[name] == item for name, item in installed.items()), "INSTALLED_NOT_IN_BUILD")
-    if revision in {"morse1", "morse3", "morse4", "morse6"}:
+    if revision in {"morse1", "morse3", "morse4", "morse6", "morse7"}:
+        additions = MORSE_ADDITIONS | QUALITY_ADDITIONS if revision == "morse7" else MORSE_ADDITIONS
         for rows in (manifest["files"], manifest["build_files"]):
-            need([item["path"] for item in rows[-len(MORSE_ADDITIONS):]] == sorted(MORSE_ADDITIONS),
+            need([item["path"] for item in rows[-len(additions):]] == sorted(additions),
                  "MORSE_ADDITION_ORDER")
         need({name for name in build if name.startswith("app/zones/backend/app/morse_native/")} ==
              MORSE_ADDITIONS - {"app/zones/backend/app/db/migrations/012_morse_native.sql"},
@@ -197,6 +203,18 @@ def verify_http(client, manifest, mode, assets=False):
          status.get("total_matches") == 0 and status.get("total_circles") == 0 and status.get("models") == [] and
          status.get("last_run_at") is None and status.get("next_run_at") is None and
          status.get("last_error_code") is None, "FRESH_COLLECTOR_STATE")
+    if manifest.get("runtime_revision") == "morse7":
+        training = status.get("training_maps")
+        maps = {"erangel", "miramar", "taego", "deston", "rondo", "vikendi", "sanhok", "karakin", "paramo"}
+        need(isinstance(training, list) and len(training) == len(maps) and
+             {row.get("map_id") for row in training if isinstance(row, dict)} == maps,
+             "FRESH_TRAINING_MAP_INVENTORY")
+        need(all(row.get("model_run_id") is None and row.get("effective_training_matches") == 0 and
+                 row.get("confidence_percent") is None and row.get("validation_match_count") == 0 and
+                 row.get("validation_case_count") == 0 and row.get("hit_count") == 0 and
+                 row.get("quality_state") == "pending" and row.get("trained_at") is None and
+                 row.get("policy") == "native-heldout-containment-v1" for row in training),
+             "FRESH_TRAINING_QUALITY_STATE")
     for map_id, radius in (("taego", 63379.70703125), ("erangel", 192059.71875)):
         value = client.json("/api/zones/predict", body={"map_id": map_id,
             "current_circle_center": {"x": 408000, "y": 408000}, "current_radius": radius})
@@ -204,7 +222,7 @@ def verify_http(client, manifest, mode, assets=False):
         extra_keys = {"quality_policy"} if revision == "accuracy1" else set()
         if revision == "accuracy1":
             need(value.get("quality_policy") == "chronological-relative-knn-v1", "PREDICTION_QUALITY_POLICY")
-        if revision in {"morse1", "morse3", "morse4", "morse6"}:
+        if revision in {"morse1", "morse3", "morse4", "morse6", "morse7"}:
             extra_keys = {"model_match_type", "prediction_policy", "parameter_policy", "upstream_commit"}
             need(value.get("model_match_type") == "mixed" and
                  value.get("prediction_policy") == "morse-original-d4a93564" and
@@ -212,12 +230,12 @@ def verify_http(client, manifest, mode, assets=False):
                  value.get("upstream_commit") == MORSE_COMMIT, "PREDICTION_NATIVE_POLICY")
         need(set(value) == extra_keys | {"map_id", "current_phase", "next_circle", "final_circle", "model_run_id", "warnings",
                             "engine", "match_type", "geometry_policy"}, "PREDICTION_SCHEMA")
-        engine = "morse_zone_predictor" if revision in {"morse1", "morse3", "morse4", "morse6"} else "pubg_circle_analyzer_knn"
-        geometry = "morse-original-v1" if revision in {"morse1", "morse3", "morse4", "morse6"} else "nested-circles-v2"
+        engine = "morse_zone_predictor" if revision in {"morse1", "morse3", "morse4", "morse6", "morse7"} else "pubg_circle_analyzer_knn"
+        geometry = "morse-original-v1" if revision in {"morse1", "morse3", "morse4", "morse6", "morse7"} else "nested-circles-v2"
         need(value["map_id"] == map_id and value["engine"] == engine and
              value["geometry_policy"] == geometry and value["match_type"] == mode and
              all(value[k] is None for k in ("current_phase", "next_circle", "final_circle", "model_run_id")), "FRESH_PREDICTION")
-        warning = ("phase_or_match_type_unresolved" if mode == "auto" and revision not in {"morse1", "morse3", "morse4", "morse6"}
+        warning = ("phase_or_match_type_unresolved" if mode == "auto" and revision not in {"morse1", "morse3", "morse4", "morse6", "morse7"}
                    else "phase_unresolved_from_observed_radii")
         need(value["warnings"] == [warning], "FRESH_PREDICTION_WARNING")
     records = []
@@ -241,6 +259,75 @@ def verify_http(client, manifest, mode, assets=False):
                 records.append({"path": parsed.path, "sha256": digest(raw), "size": len(raw)})
     return {"settings": expected_settings, "matches": 0, "circles": 0, "models": 0,
             "purePredictionPosts": 2, "assets": records, "requests": client.count}
+
+
+QUALITY_AUDIT = r'''
+"""Disposable Linux-image quality smoke; no credential source or provider request."""
+from pathlib import Path
+import hashlib, json, math, os, socket, sys, tempfile
+
+sys.path.insert(0, '/app/zones/backend')
+os.environ.pop('PUBG_API_KEY', None)
+os.umask(0o077)
+def denied(*args, **kwargs):
+    raise RuntimeError('QUALITY_PROBE_EXTERNAL_NETWORK_DENIED')
+socket.socket.connect = denied
+socket.create_connection = denied
+socket.getaddrinfo = denied
+
+from app.db.connection import connect_database
+from app.db.migrations import initialize_database
+from app.services.config_service import ConfigService
+from app.services.training import AnalyzerTrainer
+from app.services.quality import ensure_training_quality, latest_training_maps
+from app.services.analyzer import artifact_reference
+
+radii = [192059.71875, 105632.84375, 63379.70703125, 38027.82421875,
+         24718.083984375, 16066.75390625, 10443.3896484375, 6788.203125]
+with tempfile.TemporaryDirectory(prefix='gixradar-quality-', dir='/data') as directory:
+    folder = Path(directory)
+    database, model_dir = folder / 'synthetic.sqlite3', folder / 'models'
+    initialize_database(database)
+    connection = connect_database(database)
+    config = ConfigService(Path('/app/zones/config'))
+    try:
+        runs = []
+        for map_id, games in (('taego', 25), ('sanhok', 4)):
+            entry = config.get_map(map_id)
+            factor = entry['world_size'] / 816000
+            for index in range(games):
+                identity = 'quality-probe-' + map_id + '-' + str(index).zfill(3)
+                connection.execute('INSERT INTO matches(match_id,map_name,game_mode,match_type,created_at,ingest_status) VALUES(?,?,?,?,?,?)',
+                    (identity, entry['telemetry_names'][0], 'squad-fpp', 'official', '2026-01-01T00:00:00+00:00', 'completed'))
+                for phase, radius in enumerate(radii, 1):
+                    connection.execute('INSERT INTO circle_phases(match_id,phase,elapsed_time,center_x,center_y,radius) VALUES(?,?,?,?,?,?)',
+                        (identity, phase, phase * 100, (408000 + phase * 200 + index * 10) * factor,
+                         (408000 + phase * 100 + index * 5) * factor, radius * factor))
+            connection.commit()
+            run_id = AnalyzerTrainer(connection, config, model_dir).sync(map_id)
+            reference = artifact_reference(connection, model_dir, run_id)
+            assert reference is not None
+            original = hashlib.sha256(reference[1].read_bytes()).hexdigest()
+            connection.execute('BEGIN IMMEDIATE')
+            ensure_training_quality(connection, config, model_dir, run_id)
+            connection.commit()
+            assert hashlib.sha256(reference[1].read_bytes()).hexdigest() == original
+            runs.append(run_id)
+        rows = {row['map_id']: row for row in latest_training_maps(connection, config, model_dir)}
+        ready, sparse = rows['taego'], rows['sanhok']
+        assert ready['effective_training_matches'] == 20 and ready['validation_match_count'] == 5
+        assert ready['policy'] == sparse['policy'] == 'native-heldout-containment-v1'
+        assert ready['quality_state'] == 'ready'
+        assert type(ready['confidence_percent']) in (float, int) and math.isfinite(ready['confidence_percent'])
+        assert ready['confidence_percent'] == 100
+        assert sparse['effective_training_matches'] == 4 and sparse['validation_match_count'] == 0
+        assert sparse['confidence_percent'] is None and sparse['quality_state'] == 'insufficient_validation'
+        print(json.dumps({'passed': True, 'readyTrainingGames': 20, 'independentValidationGames': 5,
+            'readyConfidencePercent': ready['confidence_percent'], 'sparseConfidencePercent': None,
+            'artifactHashesUnchangedByQualityRefresh': True, 'providerRequests': 0, 'collectorStarted': False}))
+    finally:
+        connection.close()
+'''
 
 
 IMAGE_AUDIT = r'''
@@ -324,6 +411,9 @@ def main(argv=None):
         need(network_state.get("Driver") == "bridge" and network_state.get("Internal") is False, "DEDICATED_BRIDGE_NETWORK")
         need(docker("exec", identifier, "node", "--version") == "v18.5.0", "NODE_VERSION")
         report["installed"] = json.loads(docker("exec", identifier, "python3", "-c", IMAGE_AUDIT, manifest_sha, args.expected_release))
+        if manifest.get("runtime_revision") == "morse7":
+            report["trainingQuality"] = json.loads(docker("exec", identifier, "python3", "-c", QUALITY_AUDIT))
+            need(report["trainingQuality"].get("passed") is True, "TRAINING_QUALITY_AUDIT")
         report["image"] = {"requested": args.image, "id": image_id, "os": "linux", "architecture": "amd64",
                            "sourceReleaseSha256": args.expected_release, "runtimeRevision": manifest.get("runtime_revision"),
                            "defaultUser": image["Config"]["User"], "node": "v18.5.0"}

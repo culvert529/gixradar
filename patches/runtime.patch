@@ -366,6 +366,38 @@ new file mode 100644
 +    training_match_count INTEGER NOT NULL DEFAULT 0,
 +    validation_match_count INTEGER NOT NULL DEFAULT 0
 +);
+diff --git a/app/zones/backend/app/db/migrations/013_model_quality.sql b/app/zones/backend/app/db/migrations/013_model_quality.sql
+new file mode 100644
+--- /dev/null
++++ b/app/zones/backend/app/db/migrations/013_model_quality.sql
+@@ -0,0 +1,27 @@
++-- Optional held-out circle coverage. Original runs, metrics and artifact bytes
++-- remain untouched; this cache cannot participate in original model selection.
++CREATE TABLE IF NOT EXISTS morse_model_quality (
++    model_run_id TEXT NOT NULL REFERENCES model_runs(id) ON DELETE CASCADE,
++    policy TEXT NOT NULL,
++    map_id TEXT NOT NULL,
++    upstream_commit TEXT NOT NULL,
++    config_fingerprint TEXT NOT NULL,
++    dataset_fingerprint TEXT NOT NULL,
++    artifact_sha256 TEXT NOT NULL,
++    evaluation_fingerprint TEXT,
++    effective_training_matches INTEGER NOT NULL CHECK(effective_training_matches >= 0),
++    validation_match_count INTEGER NOT NULL CHECK(validation_match_count >= 0),
++    validation_case_count INTEGER NOT NULL CHECK(validation_case_count >= 0),
++    hit_count INTEGER NOT NULL CHECK(hit_count >= 0 AND hit_count <= validation_case_count),
++    unscored_case_count INTEGER NOT NULL CHECK(unscored_case_count >= 0),
++    expected_case_count INTEGER NOT NULL CHECK(expected_case_count = validation_case_count + unscored_case_count),
++    confidence_percent REAL,
++    quality_state TEXT NOT NULL CHECK(quality_state IN ('ready','insufficient_validation','pending','unavailable')),
++    trained_at TEXT NOT NULL,
++    evaluated_at TEXT NOT NULL,
++    PRIMARY KEY(model_run_id, policy),
++    CHECK ((quality_state = 'ready' AND validation_match_count >= 5
++            AND validation_case_count > 0 AND unscored_case_count = 0
++            AND confidence_percent IS NOT NULL AND confidence_percent BETWEEN 0 AND 100)
++        OR (quality_state != 'ready' AND confidence_percent IS NULL))
++);
 diff --git a/app/zones/backend/app/db/repository.py b/app/zones/backend/app/db/repository.py
 --- a/app/zones/backend/app/db/repository.py
 +++ /dev/null
@@ -3325,7 +3357,15 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
  from app.core.errors import AppError
  from app.core.timestamps import parsed_time, timestamp
  from app.db.connection import connect_database, database_connection
-@@ -50,7 +50,7 @@
+@@ -13,6 +13,7 @@
+ from app.services.pubg_api import PubgApiClient, Cancelled, path_segment, telemetry_url_allowed
+ from app.services.telemetry_parser import extract_circles, insert_circles
+ from app.services.training import AnalyzerTrainer
++from app.services.quality import latest_training_maps
+ from app.services.analyzer import ENGINE, ALGORITHM, canonical_mode, model_summaries
+ 
+ INTERVAL_SECONDS = 1800
+@@ -50,7 +51,7 @@
      data=payload.get("data") if isinstance(payload,dict) else None
      if not isinstance(data,(dict,list)):
          raise AppError("PUBG_RESPONSE_INVALID","Official sample data is incomplete",502)
@@ -3334,7 +3374,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
      for item in data if isinstance(data,list) else [data]:
          if not isinstance(item,dict):
              continue
-@@ -60,6 +60,7 @@
+@@ -60,6 +61,7 @@
          if not isinstance(refs,list):
              continue
          valid=True
@@ -3342,7 +3382,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
          for ref in refs[:1000]:
              value=ref.get("id") if isinstance(ref,dict) else None
              try:
-@@ -70,7 +71,7 @@
+@@ -70,7 +72,7 @@
                  seen.add(value);result.append(value)
              if len(result)>=1000:
                  return result
@@ -3351,7 +3391,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
          raise AppError("PUBG_RESPONSE_INVALID","Official sample data is incomplete",502)
      return result
  
-@@ -84,6 +85,7 @@
+@@ -84,6 +86,7 @@
          self.last_result=empty_result();self.last_error_code=None;self.failures=0
          self._scheduled_at=None;self._key_generation=0
          self._key_marker=self._key_digest()
@@ -3359,7 +3399,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
          with database_connection(settings.database_path) as connection:
              self._seed_legacy(connection)
              self._seed_retry_legacy(connection)
-@@ -113,6 +115,9 @@
+@@ -113,6 +116,9 @@
                  return  # Old two-field summaries remain readable.
              if value.get("last_run_at") is not None and (stamp is None or stamp>self.clock()+60):
                  return
@@ -3369,7 +3409,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
              error=value.get("last_error_code");failures=value.get("failures");due=value.get("next_run_at")
              if error is not None and (not isinstance(error,str) or error not in ERROR_CODES):
                  return
-@@ -132,6 +137,8 @@
+@@ -132,6 +138,8 @@
          with self.guard:
              value={"version":2,"last_run_at":self.last_run_at,"last_result":self.last_result,
                     "last_error_code":self.last_error_code,"failures":self.failures,"next_run_at":self._scheduled_at}
@@ -3378,7 +3418,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
              try:
                  with database_connection(self.settings.database_path) as connection:
                      connection.execute("INSERT OR REPLACE INTO collector_state(key,value) VALUES('summary',?)",
-@@ -169,6 +176,7 @@
+@@ -169,6 +177,7 @@
              if marker==self._key_marker:
                  return False
              self._key_marker=marker;self._key_generation+=1
@@ -3386,7 +3426,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
              client=self.client
              self.next_run_at=self.clock() if self.settings.pubg_api_key else None
              self._scheduled_at=self.next_run_at
-@@ -299,9 +307,9 @@
+@@ -299,9 +308,9 @@
          except Cancelled:
              cancelled=True
          except AppError as exc:
@@ -3398,7 +3438,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
          finally:
              if started:
                  with self.guard:
-@@ -467,10 +475,12 @@
+@@ -467,13 +476,16 @@
      def status(self):
          with self.guard:
              result={"enabled":True,"api_key_configured":bool(self.settings.pubg_api_key),"running":self.running,
@@ -3411,6 +3451,10 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
              result["total_matches"]=connection.execute("SELECT COUNT(*) FROM matches m WHERE EXISTS(SELECT 1 FROM circle_phases c WHERE c.match_id=m.match_id)").fetchone()[0]
              result["total_circles"]=connection.execute("SELECT COUNT(*) FROM circle_phases").fetchone()[0]
              result["models"],result["supported_stages"]=model_summaries(connection,self.config,self.settings.model_dir)
++            result["training_maps"]=latest_training_maps(connection,self.config,self.settings.model_dir)
+             result["engine"]=ENGINE
+             result["algorithm"]=ALGORITHM
+         finally:
 diff --git a/app/zones/backend/app/services/config_service.py b/app/zones/backend/app/services/config_service.py
 --- a/app/zones/backend/app/services/config_service.py
 +++ b/app/zones/backend/app/services/config_service.py
@@ -3731,10 +3775,309 @@ diff --git a/app/zones/backend/app/services/pubg_api.py b/app/zones/backend/app/
          raise AppError("INVALID_MATCH_REFERENCE", "Official match reference is invalid")
      return value
  
+diff --git a/app/zones/backend/app/services/quality.py b/app/zones/backend/app/services/quality.py
+new file mode 100644
+--- /dev/null
++++ b/app/zones/backend/app/services/quality.py
+@@ -0,0 +1,294 @@
++"""Optional historical coverage of the latest original training artifact.
++
++This is pooled held-out case coverage, not a future-circle probability. Native
++fit, split, artifact bytes, circle math and serving model ranking are unchanged.
++Evaluation is a writer task; status reads only the saved per-run cache.
++"""
++from __future__ import annotations
++
++from dataclasses import asdict
++from datetime import datetime, timezone
++from math import hypot, isclose, isfinite
++from pathlib import Path
++from statistics import median
++from uuid import uuid4
++import hashlib
++import json
++import re
++import sqlite3
++
++from app.morse_native.coordinates import CoordinateTransformer, Point
++from app.morse_native.prediction import PredictionService as NativePredictionService, LLMSettings
++from app.morse_native.training import TrainingService as NativeTrainingService
++from app.morse_native.errors import AppError as NativeError
++from app.services.analyzer import ALGORITHM, UPSTREAM_COMMIT, artifact_reference, fingerprint, native_config
++
++POLICY = 'native-heldout-containment-v1'
++MIN_VALIDATION_MATCHES = 5
++_COLUMNS = ('model_run_id','policy','map_id','upstream_commit','config_fingerprint','dataset_fingerprint',
++    'artifact_sha256','evaluation_fingerprint','effective_training_matches','validation_match_count',
++    'validation_case_count','hit_count','unscored_case_count','expected_case_count','confidence_percent',
++    'quality_state','trained_at','evaluated_at')
++_RUNS_SQL = """SELECT r.id,r.created_at,r.maps_included,r.sample_count,r.model_path,r.status,r.algorithm,
++    p.upstream_commit,p.config_fingerprint,p.dataset_fingerprint,p.artifact_sha256,
++    p.training_match_count,p.validation_match_count
++    FROM main.model_runs r JOIN main.morse_runs p ON p.model_run_id=r.id
++    WHERE r.status='completed' AND p.upstream_commit=? AND r.algorithm=?"""
++
++
++def _check(cancel_check):
++    if cancel_check is not None:
++        cancel_check()
++
++
++def _count(value):
++    return type(value) is int and value >= 0
++
++
++def _finite(value):
++    return type(value) in (int, float) and isfinite(value)
++
++
++def _map_id(row, known):
++    try:
++        maps = json.loads(row['maps_included'])
++    except (ValueError, TypeError):
++        return None
++    # Application-owned native runs train exactly one map. A multi-map run's
++    # aggregate training count cannot honestly be attributed to each map.
++    return maps[0] if isinstance(maps,list) and len(maps)==1 and isinstance(maps[0],str) and maps[0] in known else None
++
++
++def _base(row, map_id):
++    return {'map_id':map_id,'model_run_id':row['id'],
++        'effective_training_matches':row['training_match_count'],'confidence_percent':None,
++        'validation_match_count':row['validation_match_count'],'validation_case_count':0,'hit_count':0,
++        'quality_state':'pending','trained_at':row['created_at'],'policy':POLICY}
++
++
++def _cached(connection, row, map_id):
++    try:
++        cached = connection.execute('SELECT * FROM main.morse_model_quality WHERE model_run_id=? AND policy=?',
++                                    (row['id'],POLICY)).fetchone()
++    except sqlite3.Error:
++        return None
++    if cached is None:
++        return None
++    if any(cached[key] != row[key] for key in ('upstream_commit','config_fingerprint','dataset_fingerprint','artifact_sha256')):
++        return None
++    if (cached['map_id'] != map_id or cached['effective_training_matches'] != row['training_match_count']
++            or cached['validation_match_count'] != row['validation_match_count'] or cached['trained_at'] != row['created_at']):
++        return None
++    counts = [cached[key] for key in ('effective_training_matches','validation_match_count',
++        'validation_case_count','hit_count','unscored_case_count','expected_case_count')]
++    if not all(_count(value) for value in counts):
++        return None
++    cases, hits, missing, expected = counts[2:]
++    state, score = cached['quality_state'], cached['confidence_percent']
++    if hits > cases or cases + missing != expected or state not in ('ready','insufficient_validation','pending','unavailable'):
++        return None
++    if state == 'ready':
++        if (counts[1] < MIN_VALIDATION_MATCHES or cases == 0 or missing or not _finite(score)
++                or expected < 2*counts[1] or not 0 <= score <= 100
++                or not isclose(float(score),100.0*hits/cases,rel_tol=0,abs_tol=1e-9)):
++            return None
++    elif score is not None:
++        return None
++    if state == 'insufficient_validation' and counts[1] >= MIN_VALIDATION_MATCHES:
++        return None
++    if state != 'pending' and (not isinstance(cached['evaluation_fingerprint'],str)
++                              or not re.fullmatch('[a-f0-9]{64}',cached['evaluation_fingerprint'])):
++        return None
++    return cached
++
++
++def _public(cached, row, map_id):
++    result = _base(row,map_id)
++    for key in ('confidence_percent','validation_case_count','hit_count','quality_state'):
++        result[key] = cached[key]
++    return result
++
++
++def _radii(connection, ids, cancel_check):
++    result = {}
++    # Keep below older SQLite variable limits even after long-lived collection.
++    ordered = sorted(ids)
++    for offset in range(0,len(ordered),500):
++        _check(cancel_check)
++        batch = ordered[offset:offset+500]
++        rows = connection.execute('SELECT match_id,phase,radius FROM main.circle_phases WHERE match_id IN ('+
++                                  ','.join('?' for _ in batch)+') ORDER BY match_id,phase',batch).fetchall()
++        for row in rows:
++            if _finite(row['radius']) and row['radius'] >= 0:
++                result[(row['match_id'],row['phase'])] = float(row['radius'])
++    return result
++
++
++def _save(connection, values):
++    columns = ','.join(_COLUMNS)
++    updates = ','.join(name+'=excluded.'+name for name in _COLUMNS if name not in ('model_run_id','policy'))
++    connection.execute('INSERT INTO main.morse_model_quality('+columns+') VALUES('+','.join('?' for _ in _COLUMNS)+
++        ') ON CONFLICT(model_run_id,policy) DO UPDATE SET '+updates,tuple(values[name] for name in _COLUMNS))
++
++
++def ensure_training_quality(connection, config, model_dir, run_id, cancel_check=None):
++    """Evaluate one exact original run inside the caller's existing transaction.
++
++    No commit or DDL is issued. This function rolls back only its own SAVEPOINT
++    on error and re-raises, allowing integration to keep optional quality failure
++    separate from successful original training. Cancellation is never swallowed.
++    """
++    if not connection.in_transaction:
++        raise ValueError('Quality evaluation requires a caller-owned transaction')
++    _check(cancel_check)
++    marker = 'morse_quality_'+uuid4().hex
++    connection.execute('SAVEPOINT '+marker)
++    try:
++        native = native_config()
++        known = {entry['map_id'] for entry in native.list_maps()}
++        row = connection.execute(_RUNS_SQL+' AND r.id=?',(UPSTREAM_COMMIT,ALGORITHM,run_id)).fetchone()
++        if row is None or not all(_count(row[key]) for key in ('sample_count','training_match_count','validation_match_count')):
++            _check(cancel_check)
++            connection.execute('RELEASE SAVEPOINT '+marker)
++            return None
++        map_id = _map_id(row,known)
++        reference = artifact_reference(connection,model_dir,run_id) if map_id else None
++        if reference is None:
++            _check(cancel_check)
++            connection.execute('RELEASE SAVEPOINT '+marker)
++            return None
++        _registered, artifact, _payload = reference
++        values = {'model_run_id':run_id,'policy':POLICY,'map_id':map_id,
++            **{key:row[key] for key in ('upstream_commit','config_fingerprint','dataset_fingerprint','artifact_sha256')},
++            'evaluation_fingerprint':None,'effective_training_matches':row['training_match_count'],
++            'validation_match_count':row['validation_match_count'],'validation_case_count':0,'hit_count':0,
++            'unscored_case_count':0,'expected_case_count':0,'confidence_percent':None,'quality_state':'pending',
++            'trained_at':row['created_at'],'evaluated_at':datetime.now(timezone.utc).isoformat()}
++        entry = native.get_map(map_id)
++        phases = native.get_zone_phases(map_id)
++        trainer = NativeTrainingService(connection,native,Path(model_dir)/'morse')
++        samples = trainer.build_samples(map_id)
++        _check(cancel_check)
++        current_config = fingerprint({'map':entry,'zones':phases})
++        current_dataset = fingerprint({'map_id':map_id,'samples':[asdict(sample) for sample in samples]})
++        training, validation = trainer._split_samples_by_match(samples)
++        train_ids = {sample.match_id for sample in training}
++        validation_ids = {sample.match_id for sample in validation}
++        same = (current_config == row['config_fingerprint'] and current_dataset == row['dataset_fingerprint']
++            and len(samples) == row['sample_count'] and len(train_ids) == row['training_match_count']
++            and len(validation_ids) == row['validation_match_count'])
++        if same:
++            training_radii = _radii(connection,train_ids,cancel_check)
++            # Only training-game target radii calibrate the predicted circle.
++            medians = {phase:float(median([radius for (_identity,p),radius in training_radii.items() if p==phase]))
++                       for phase in sorted({p for _identity,p in training_radii})}
++            known_radii = {}
++            for sample in validation:
++                _check(cancel_check)
++                radius = connection.execute('SELECT radius FROM main.circle_phases WHERE match_id=? AND phase=?',
++                                            (sample.match_id,sample.current_phase)).fetchone()
++                value = radius['radius'] if radius is not None else None
++                known_radii[(sample.match_id,sample.current_phase)] = float(value) if _finite(value) and value>0 else None
++            values['evaluation_fingerprint'] = fingerprint({'training_target_radii':sorted(medians.items()),
++                'validation_known_current_radii':[[sample.match_id,sample.current_phase,known_radii[(sample.match_id,sample.current_phase)]] for sample in validation]})
++            cached = _cached(connection,row,map_id)
++            if cached is not None and cached['evaluation_fingerprint'] == values['evaluation_fingerprint']:
++                _check(cancel_check)
++                connection.execute('RELEASE SAVEPOINT '+marker)
++                return _public(cached,row,map_id)
++            predictor = NativePredictionService(connection,native,Path(model_dir)/'morse',
++                LLMSettings(enabled=False,base_url=None,api_key=None,model=None,timeout_seconds=1))
++            loaded = predictor._load_model_from_row(row,[])
++            values['expected_case_count'] = 2*len(validation)
++            if loaded is None:
++                values['unscored_case_count'] = values['expected_case_count']
++                values['quality_state'] = 'unavailable'
++            else:
++                transformer = CoordinateTransformer.from_map_config(entry)
++                final_phase = int(phases['final_phase'])
++                for sample in validation:
++                    _check(cancel_check)
++                    current_radius = known_radii[(sample.match_id,sample.current_phase)]
++                    current = Point(sample.current_center_x,sample.current_center_y)
++                    targets = trainer._sample_targets(sample)
++                    if not all(_finite(value) for value in (current.x,current.y)):
++                        values['unscored_case_count'] += 2
++                        continue
++                    try:
++                        predictor._validate_world_point(transformer,current)
++                    except NativeError:
++                        values['unscored_case_count'] += 2
++                        continue
++                    for kind,target_phase,shift in (('next',sample.current_phase+1,0.25),('final',final_phase,0.6)):
++                        _check(cancel_check)
++                        target = targets[kind]
++                        radius = medians.get(target_phase)
++                        if (current_radius is None or radius is None or not all(_finite(value) for value in
++                                (current.x,current.y,target.x,target.y))):
++                            values['unscored_case_count'] += 1
++                            continue
++                        # These are the unchanged pinned predict() call arguments;
++                        # no offset, feature-grid, constraint or fallback formula
++                        # is copied here. Validation targets are used only below.
++                        circle = predictor._predict_circle(map_id=map_id,current_phase=sample.current_phase,
++                            target_type=kind,target_phase=target_phase,current_radius=current_radius,target_radius=radius,
++                            current_center=current,transformer=transformer,loaded_model=loaded,fallback_shift=shift,warnings=[])
++                        if (not all(_finite(value) for value in (circle.center.x,circle.center.y,circle.radius)) or circle.radius<0):
++                            values['unscored_case_count'] += 1
++                            continue
++                        values['validation_case_count'] += 1
++                        if hypot(circle.center.x-target.x,circle.center.y-target.y) <= circle.radius:
++                            values['hit_count'] += 1
++                if len(validation_ids) < MIN_VALIDATION_MATCHES:
++                    values['quality_state'] = 'insufficient_validation'
++                elif not values['validation_case_count'] or values['unscored_case_count']:
++                    values['quality_state'] = 'unavailable'
++                else:
++                    values['quality_state'] = 'ready'
++                    values['confidence_percent'] = 100.0*values['hit_count']/values['validation_case_count']
++            # Loading/evaluation never edits the original JSON; reject any
++            # outside mutation while the optional calculation was in flight.
++            if hashlib.sha256(artifact.read_bytes()).hexdigest() != row['artifact_sha256']:
++                raise ValueError('Native artifact changed during quality evaluation')
++        _check(cancel_check)
++        _save(connection,values)
++        _check(cancel_check)
++        connection.execute('RELEASE SAVEPOINT '+marker)
++        return _public(values,row,map_id)
++    except BaseException:
++        # SQLite may already have cancelled its outer transaction after an I/O
++        # failure. Cleanup must never replace the original error/Cancelled.
++        try:
++            connection.execute('ROLLBACK TO SAVEPOINT '+marker)
++            connection.execute('RELEASE SAVEPOINT '+marker)
++        except sqlite3.Error:
++            pass
++        raise
++
++
++def latest_training_maps(connection, config, model_dir):
++    """Latest completed valid native run per map; cached quality only, no fit."""
++    native = native_config()
++    known = {entry['map_id'] for entry in native.list_maps()}
++    result = {map_id:{'map_id':map_id,'model_run_id':None,'effective_training_matches':0,
++        'confidence_percent':None,'validation_match_count':0,'validation_case_count':0,'hit_count':0,
++        'quality_state':'pending','trained_at':None,'policy':POLICY} for map_id in known}
++    try:
++        rows = connection.execute(_RUNS_SQL+' ORDER BY r.created_at DESC,r.id DESC',(UPSTREAM_COMMIT,ALGORITHM)).fetchall()
++        found = set()
++        for row in rows:
++            map_id = _map_id(row,known)
++            if map_id is None or map_id in found or not all(_count(row[key]) for key in ('training_match_count','validation_match_count')):
++                continue
++            if artifact_reference(connection,model_dir,row['id']) is None:
++                result[map_id]['quality_state'] = 'unavailable'
++                continue
++            found.add(map_id)
++            result[map_id] = _base(row,map_id)
++            cached = _cached(connection,row,map_id)
++            if cached is not None:
++                result[map_id] = _public(cached,row,map_id)
++    except (sqlite3.Error, OSError, ValueError, TypeError):
++        # Optional metadata failure must not break the existing collector GET.
++        pass
++    return [result[entry['map_id']] for entry in native.list_maps()]
 diff --git a/app/zones/backend/app/services/training.py b/app/zones/backend/app/services/training.py
 --- a/app/zones/backend/app/services/training.py
 +++ b/app/zones/backend/app/services/training.py
-@@ -1,261 +1,277 @@
+@@ -1,261 +1,312 @@
 -"""Bounded SQLite-to-JSON training matrices for the new Circle Analyzer engine."""
 +"""Run the pinned Morse trainer, with atomic application-owned persistence."""
  from __future__ import annotations
@@ -3770,6 +4113,7 @@ diff --git a/app/zones/backend/app/services/training.py b/app/zones/backend/app/
 -        raise AppError("UNSUPPORTED_MATCH_TYPE", "Choose normal or competitive")
 -    # Replacing a UDF while another cursor is active is rejected by SQLite.
 -    # Probe this connection first; do not retain connections in a global cache.
++from app.services.quality import ensure_training_quality
 +
 +_ARTIFACT_NAME = re.compile(r"model_[a-f0-9]{32}\.json")
 +
@@ -4051,6 +4395,75 @@ diff --git a/app/zones/backend/app/services/training.py b/app/zones/backend/app/
 -        path = folder / (data["id"] + ".json")
 -        temporary = None
 -        renamed = False
++    def _try_quality(self, run_id):
++        """Isolate optional display metrics from the native training outcome.
++
++        A native attempt is already committed here. Even SQLite failures that
++        automatically roll back an entire transaction can therefore only undo
++        optional metrics. BEGIN IMMEDIATE gives the evaluator one stable input
++        snapshot; it verifies fingerprints again before publishing any score.
++        """
++        self.check()
++        # Do not commit or risk rolling back a transaction owned by our caller.
++        # A later ordinary collector/bootstrap attempt can fill the cache.
++        if self.connection.in_transaction:
++            return False
+         try:
+-            with tempfile.NamedTemporaryFile(mode="wb", dir=folder, prefix=".analyzer-", delete=False) as stream:
+-                temporary = Path(stream.name)
+-                os.chmod(temporary, 0o600)
+-                stream.write(raw); stream.flush(); os.fsync(stream.fileno())
+-            self.check()
+-            if os.path.lexists(path):
+-                raise FileExistsError("Checkpoint target already exists")
+-            os.replace(temporary, path)
+-            renamed = True
+-            self.check()
+-            available = any(value["validation_available"] for value in data["metrics"].values())
+-            self.connection.execute(
+-                """INSERT INTO analyzer_runs(id,created_at,engine,algorithm,map_id,match_type,
+-                   dataset_fingerprint,sample_count,training_match_count,validation_available,
+-                   artifact_path,artifact_sha256,metrics_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+-                (data["id"], data["created_at"], ENGINE, ALGORITHM, map_id, mode,
+-                 data["dataset_fingerprint"], data["sample_count"], data["training_match_count"], int(available),
+-                 path.name, hashlib.sha256(raw).hexdigest(), json.dumps(data["metrics"], allow_nan=False)))
+-            self.check()
+-            self.connection.execute(
+-                """INSERT INTO analyzer_state VALUES(?,?,?,?,?) ON CONFLICT(map_id,match_type) DO UPDATE SET
+-                   dataset_fingerprint=excluded.dataset_fingerprint,model_run_id=excluded.model_run_id,
+-                   updated_at=excluded.updated_at""",
+-                (map_id, mode, data["dataset_fingerprint"], data["id"], data["created_at"]))
++            self.connection.execute("BEGIN IMMEDIATE")
++            ensure_training_quality(self.connection, self.native_config, self.model_dir, run_id, self.check)
+             self.check()
+             self.connection.commit()
+-            return data["id"]
+-        except Exception:
++            return True
++        except BaseException as error:
+             try:
+                 self.connection.rollback()
+             except Exception:
+-                pass  # An uncertain rollback must retain both file and original error.
+-            else:
+-                if renamed:
+-                    try:
+-                        registered = self.connection.execute(
+-                            "SELECT 1 FROM analyzer_runs WHERE id=? OR artifact_path=? LIMIT 1",
+-                            (data["id"], path.name)).fetchone()
+-                        if registered is None:
+-                            path.unlink(missing_ok=True)
+-                    except Exception:
+-                        pass  # Never delete when publication is uncertain or mask its error.
+-            raise
+-        finally:
+-            if temporary is not None:
++                pass  # This transaction owns no native run/artifact writes.
++            if isinstance(error, Cancelled) or not isinstance(error, Exception):
++                raise
++            self.check()
++            return False
++
 +    def _clean_interrupted_files(self, folder):
 +        """Recover only unregistered files in the new Morse artifact directory.
 +
@@ -4077,7 +4490,8 @@ diff --git a/app/zones/backend/app/services/training.py b/app/zones/backend/app/
 +                for child in path.iterdir():
 +                    if not child.is_symlink() and child.is_file() and _ARTIFACT_NAME.fullmatch(child.name):
 +                        child.unlink()
-+                try:
+                 try:
+-                    temporary.unlink(missing_ok=True)
 +                    path.rmdir()
 +                except OSError:
 +                    pass
@@ -4095,32 +4509,7 @@ diff --git a/app/zones/backend/app/services/training.py b/app/zones/backend/app/
 +        savepoint = "morse_training_" + uuid4().hex
 +        savepoint_created = False
 +        service = None
-         try:
--            with tempfile.NamedTemporaryFile(mode="wb", dir=folder, prefix=".analyzer-", delete=False) as stream:
--                temporary = Path(stream.name)
--                os.chmod(temporary, 0o600)
--                stream.write(raw); stream.flush(); os.fsync(stream.fileno())
--            self.check()
--            if os.path.lexists(path):
--                raise FileExistsError("Checkpoint target already exists")
--            os.replace(temporary, path)
--            renamed = True
--            self.check()
--            available = any(value["validation_available"] for value in data["metrics"].values())
--            self.connection.execute(
--                """INSERT INTO analyzer_runs(id,created_at,engine,algorithm,map_id,match_type,
--                   dataset_fingerprint,sample_count,training_match_count,validation_available,
--                   artifact_path,artifact_sha256,metrics_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
--                (data["id"], data["created_at"], ENGINE, ALGORITHM, map_id, mode,
--                 data["dataset_fingerprint"], data["sample_count"], data["training_match_count"], int(available),
--                 path.name, hashlib.sha256(raw).hexdigest(), json.dumps(data["metrics"], allow_nan=False)))
--            self.check()
--            self.connection.execute(
--                """INSERT INTO analyzer_state VALUES(?,?,?,?,?) ON CONFLICT(map_id,match_type) DO UPDATE SET
--                   dataset_fingerprint=excluded.dataset_fingerprint,model_run_id=excluded.model_run_id,
--                   updated_at=excluded.updated_at""",
--                (map_id, mode, data["dataset_fingerprint"], data["id"], data["created_at"]))
--            self.check()
++        try:
 +            if not had_transaction:
 +                self.connection.execute("BEGIN IMMEDIATE")
 +            self.connection.execute("SAVEPOINT " + savepoint)
@@ -4152,44 +4541,31 @@ diff --git a/app/zones/backend/app/services/training.py b/app/zones/backend/app/
 +                self.check()
 +                if artifact_reference(self.connection, self.model_dir, row["model_run_id"]) is not None:
 +                    self.connection.execute("RELEASE SAVEPOINT " + savepoint)
++                    savepoint_created = False
 +                    if not had_transaction:
 +                        self.connection.rollback()
++                        self._try_quality(row["model_run_id"])
 +                    return row["model_run_id"]
 +            service = _AtomicTrainingService(self.connection, config, folder, self.check, config_hash, dataset_hash)
 +            run = service.train_baseline(map_id)
 +            self.check()
 +            self.connection.execute("RELEASE SAVEPOINT " + savepoint)
-             self.connection.commit()
--            return data["id"]
--        except Exception:
++            savepoint_created = False
++            self.connection.commit()
++            if run.status == "completed":
++                self._try_quality(run.id)
 +            return run.id if run.status == "completed" else None
 +        except BaseException:
-             try:
--                self.connection.rollback()
++            try:
 +                if savepoint_created:
 +                    self.connection.execute("ROLLBACK TO SAVEPOINT " + savepoint)
 +                    self.connection.execute("RELEASE SAVEPOINT " + savepoint)
 +                if not had_transaction:
 +                    self.connection.rollback()
-             except Exception:
--                pass  # An uncertain rollback must retain both file and original error.
--            else:
--                if renamed:
--                    try:
--                        registered = self.connection.execute(
--                            "SELECT 1 FROM analyzer_runs WHERE id=? OR artifact_path=? LIMIT 1",
--                            (data["id"], path.name)).fetchone()
--                        if registered is None:
--                            path.unlink(missing_ok=True)
--                    except Exception:
--                        pass  # Never delete when publication is uncertain or mask its error.
--            raise
--        finally:
--            if temporary is not None:
++            except Exception:
 +                # A commit can succeed before its caller sees an I/O error.
 +                # Do not remove a file unless SQLite proves it unpublished.
-                 try:
--                    temporary.unlink(missing_ok=True)
++                try:
 +                    self.connection.rollback()
                  except Exception:
                      pass
@@ -4242,42 +4618,54 @@ diff --git a/app/zones/backend/app/services/training.py b/app/zones/backend/app/
 diff --git a/app/zones/web/index.html b/app/zones/web/index.html
 --- a/app/zones/web/index.html
 +++ b/app/zones/web/index.html
-@@ -1,9 +1,10 @@
+@@ -1,9 +1,11 @@
  <!doctype html>
 -<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=51aaa647d57f"><script defer src="/zones/settings.js?v=6b6d487fea36"></script></head>
-+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=c97345209f22"><script defer src="/zones/settings.js?v=ba2897c0d062"></script></head>
++<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=2c3b336b1a51"><script defer src="/zones/settings.js?v=83e8a0ac1c44"></script></head>
  <body><main>
  <p id="connection" class="muted" role="status">正在读取圈型预测状态…</p>
 -<section><h1>Circle Analyzer / KNN</h1><label for="prediction-mode">对局模式</label><select id="prediction-mode" disabled><option value="auto">自动</option><option value="normal">普通匹配</option><option value="competitive">竞技排位</option></select><p id="mode-message" role="status"></p><p class="muted">自动模式无法区分圈型时，可手动选择实际对局模式。</p></section>
 +<button id="retry-connection" type="button" hidden>重新连接</button>
++<a id="radar-login" href="/" target="_blank" rel="noopener" hidden>打开雷达登录（新标签页）</a>
 +<section><h1>Morse 圈型预测</h1><label for="prediction-mode">阶段识别模式</label><select id="prediction-mode" disabled><option value="auto">自动</option><option value="normal">普通匹配</option><option value="competitive">竞技排位</option></select><p id="mode-message" role="status"></p><p class="muted">模式用于识别当前圈阶段；原版统计模型按地图训练，普通与竞技共用。不能确认阶段时暂不叠加。</p></section>
  <section><h2>官方 API Key</h2><p id="configured" class="muted">正在读取…</p><form id="key-form" hidden><label for="api-key">新的 PUBG API Key</label><input id="api-key" type="password" autocomplete="new-password" placeholder="仅在需要配置或更换时填写" maxlength="4096" required><button id="save-key" type="submit">保存 API Key</button><p id="message" role="status"></p></form><p class="muted">保存后自动更新圈样本；密钥不会回显。</p></section>
  <section><h2>自动采集与样本更新</h2><dl><dt>当前状态</dt><dd id="collector-state">—</dd><dt>采集计划</dt><dd id="interval">—</dd><dt>上次任务</dt><dd id="last-run">—</dd><dt>下次检查</dt><dd id="next-run">—</dd><dt>已收集比赛</dt><dd id="matches">—</dd><dt>圈型记录</dt><dd id="circles">—</dd></dl><p id="last-result" class="muted"></p><p id="task-error" class="error" role="status"></p><p class="muted">状态更新于 <span id="updated">—</span></p></section>
 -<section><h2>可用 KNN 样本</h2><ul id="models"></ul><p class="notice">圈预测默认开启，按地图和对局模式使用 Circle Analyzer / KNN。各阶段至少需要 5 场独立比赛；样本不足时仅按可用校准估计，无法判断时暂不显示。圈样本数与独立比赛数分开统计，不代表预测准确率；实际圈型以游戏为准。</p></section>
-+<section><h2>原版模型与验证</h2><ul id="models"></ul><p class="notice">定时任务负责采集和训练，预测保留 Morse 原版的网格统计、选模与规则兜底。模型不可用时，原版仍可返回规则估计。留出指标用于了解历史表现，不代表实战准确率；实际圈型以游戏为准。</p></section>
++<section><h2>地图自动训练</h2><ul id="models"></ul><details class="training-explanation"><summary>如何理解模型可信度</summary><p class="muted">按最近一次完成的训练统计。可信度是独立验证中，实际圈心落入预测圈的比例；验证不足 5 场时待验证，不代表下一局成功概率。预测继续按原版自动选模。</p></details></section>
  </main></body></html>
 diff --git a/app/zones/web/settings.css b/app/zones/web/settings.css
 --- a/app/zones/web/settings.css
 +++ b/app/zones/web/settings.css
-@@ -1 +1,6 @@
+@@ -1 +1,15 @@
  :root{color-scheme:dark;font:14px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif;background:#10131c;color:#e7ecf1}*{box-sizing:border-box}body{margin:0;padding:20px}main{max-width:560px;margin:auto}section{border:1px solid #2c3441;border-radius:10px;padding:16px;margin-bottom:16px;background:#151b26}h1{font-size:17px;margin:0 0 8px}h2{font-size:14px;margin:0 0 12px}p{margin:8px 0}.muted{color:#a4b0c1;font-size:12px}label{display:block;font-size:12px;color:#b9c5d5;margin-bottom:6px}input,select{width:100%;padding:10px 12px;border:1px solid #3a475c;border-radius:6px;background:#0d121b;color:#edf4ff;font:inherit}button{margin-top:10px;padding:8px 16px;border:1px solid #5f8db6;border-radius:6px;background:#25415a;color:#f2f7ff;font:inherit;cursor:pointer}button:disabled{opacity:.5;cursor:default}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid #91c8ef;outline-offset:2px}dl{display:grid;grid-template-columns:auto 1fr;gap:8px 16px;margin:0}dt{color:#a4b0c1}dd{margin:0;text-align:right;overflow-wrap:anywhere}ul{list-style:none;padding:0;margin:10px 0 0}li{display:flex;gap:12px;justify-content:space-between;padding:7px 0;border-top:1px solid #2a3342}.notice{color:#cfb786;font-size:12px}.error{color:#ffbaa9}#message,#mode-message{min-height:1.6em;font-size:12px}[hidden]{display:none!important}@media(max-width:420px){body{padding:12px}section{padding:12px}dl{gap:7px 10px}}
 +
-+#models>li{display:grid;grid-template-columns:minmax(0,1fr);gap:3px;padding:10px 0}
++#models{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
++#models>li{display:grid;grid-template-columns:minmax(0,1fr);align-content:start;gap:6px;padding:12px;border:1px solid #2a3342;border-radius:8px;background:#101722}
 +#models>li>span{min-width:0;overflow-wrap:anywhere}
 +#models>li>span:first-child{font-weight:600}
-+#models>li>span+span{font-size:12px;line-height:1.65;color:#a4b0c1;font-variant-numeric:tabular-nums}
++#models>li>span+span{font-size:12px;line-height:1.65;color:#b4c1d2;font-variant-numeric:tabular-nums}
++#models>li>span:nth-child(3){color:#8ac7fa}
++#models progress{width:100%;height:6px;accent-color:#68b8f3;border:0;border-radius:4px;overflow:hidden;background:#283547}
++#models progress::-webkit-progress-bar{background:#283547}
++#models progress::-webkit-progress-value{background:#68b8f3}
++#models progress::-moz-progress-bar{background:#68b8f3}
++.training-explanation{margin-top:14px;font-size:12px}.training-explanation summary{color:#a4b0c1;cursor:pointer}.training-explanation summary:focus-visible{outline:2px solid #91c8ef;outline-offset:2px}
++#radar-login{display:inline-flex;align-items:center;min-height:44px;padding:8px 14px;margin:0 0 12px;border:1px solid #5f8db6;border-radius:6px;color:#b9defa;text-decoration:none}
++#radar-login:focus-visible{outline:2px solid #91c8ef;outline-offset:2px}
 diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
 --- a/app/zones/web/settings.js
 +++ b/app/zones/web/settings.js
-@@ -1,6 +1,7 @@
+@@ -1,6 +1,9 @@
  (function () {
    'use strict';
    const byId = id => document.getElementById(id);
 +  const retryButton = byId('retry-connection');
++  const loginLink = byId('radar-login'), standalone = window.parent === window;
++  const standaloneLoginMessage = '请打开雷达完成登录，再返回此页；系统会继续核对会话。';
    const controllers = new Set();
    let timer = null, active = true, authorized = false, saving = false, refreshing = false, refreshPending = false;
    let initialized = false, initializing = false, initFailures = 0, predictionMode = 'auto';
-@@ -8,6 +9,7 @@
+@@ -8,6 +11,7 @@
    let writeEpoch = 0, readSequence = 0, appliedRead = 0, pendingMode = null, reconcileTimer = null, reconciling = false;
    let resumePending = false, resuming = false;
    let initialSettingsSynced = false;
@@ -4285,7 +4673,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
    const modes = { auto: '自动', normal: '普通匹配', competitive: '竞技排位' };
    const text = (id, value) => { byId(id).textContent = value; };
    const count = value => Number.isSafeInteger(value) && value >= 0 ? value.toLocaleString() : '—';
-@@ -28,6 +30,27 @@
+@@ -28,6 +32,36 @@
        return await response.json();
      } finally { clearTimeout(timeout); controllers.delete(controller); }
    }
@@ -4310,19 +4698,38 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
 +    }
 +    syncRetryControl();
 +  }
++  function dismissLogin() {
++    if (!loginLink) return;
++    if (!loginLink.hidden && document.activeElement === loginLink) {
++      const mode = byId('prediction-mode'), key = byId('api-key');
++      const target = !mode.disabled ? mode : !byId('key-form').hidden && !key.disabled ? key : null;
++      if (target && typeof target.focus === 'function') { try { target.focus(); } catch (_) {} }
++    }
++    loginLink.hidden = true;
++  }
    function postParent(data) {
      if (!window.parent || window.parent === window || !window.location || typeof window.parent.postMessage !== 'function') return;
      window.parent.postMessage(data, window.location.origin);
-@@ -36,7 +59,7 @@
+@@ -36,7 +70,7 @@
      clearTimeout(authTimer);
      if (!active || document.hidden) return;
      if (!completionHint && authAttempts >= 5) {
 -      text('connection', '会话尚未恢复，请确认雷达已连接；切回页面或重新打开可继续核对。'); return;
-+      text('connection', '会话尚未恢复，请确认雷达已连接；切回页面或重新打开可继续核对。'); offerRetry(); return;
++      text('connection', standalone ? standaloneLoginMessage : '会话尚未恢复，请确认雷达已连接；切回页面或重新打开可继续核对。'); offerRetry(); return;
      }
      const requestId = authRequestId;
      authTimer = setTimeout(() => {
-@@ -77,23 +100,27 @@
+@@ -51,7 +85,8 @@
+     authorized = false; initialized = false; clearTimeout(timer); clearTimeout(reconcileTimer); reconcileTimer = null;
+     byId('key-form').hidden = true;
+     byId('prediction-mode').disabled = true;
+-    text('connection', '正在等待雷达登录会话恢复；无需另填 PIN。');
++    if (loginLink) loginLink.hidden = !standalone;
++    text('connection', standalone ? standaloneLoginMessage : '正在等待雷达登录会话恢复；无需另填 PIN。');
+     if (!authRequested) {
+       authRequested = true; authReplySeen = false; authRequestId = authRequestId % 1000000 + 1;
+       postParent({type: 'gixradar:session-request', version: 1, requestId: authRequestId});
+@@ -77,23 +112,27 @@
    async function resumeWhenReady() {
      if (!resumePending || !active || document.hidden || resuming || initializing || refreshing || saving || reconciling) return;
      resumePending = false; resuming = true;
@@ -4353,7 +4760,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
        drainRefresh();
      }
    }
-@@ -102,7 +129,12 @@
+@@ -102,7 +141,12 @@
    }
    async function readSettings(version, notify = false) {
      const sequence = ++readSequence;
@@ -4367,36 +4774,62 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
      if (!active || version !== writeEpoch || sequence < appliedRead) return null;
      const changed = result.prediction_mode !== predictionMode;
      applySettings(result); appliedRead = sequence;
-@@ -163,22 +195,39 @@
+@@ -150,7 +194,8 @@
+   function render(status) {
+     text('configured', status.api_key_configured ? '已配置（不会回显）' : '尚未配置');
+     const code = status.last_error_code;
+-    const problem = code === 'PUBG_AUTH_REJECTED' ? '官方 API 拒绝认证，请更换有效的 Key。'
++    const problem = code && !status.api_key_configured ? '请先配置 API Key，再继续更新圈样本。'
++      : code === 'PUBG_AUTH_REJECTED' ? '官方 API 拒绝认证，请更换有效的 Key。'
+       : code === 'PUBG_RATE_LIMITED' ? '官方 API 暂时限流，系统会按计划重试。'
+       : code ? '最近一次任务暂时失败，系统会按计划重试。' : '';
+     text('collector-state', !status.api_key_configured ? '等待 API Key'
+@@ -163,22 +208,52 @@
      text('last-result', `检查 ${count(result.checked)} · 新增 ${count(result.inserted)} · 跳过 ${count(result.skipped)} · 失败 ${count(result.failed)}`);
      text('updated', new Date().toLocaleTimeString());
      text('task-error', problem);
++    const latestTraining = Object.prototype.hasOwnProperty.call(status, 'training_maps');
++    const rows = latestTraining ? status.training_maps : status.models;
 +    const available = new Map();
-+    for (const model of Array.isArray(status.models) ? status.models.slice(0, 18) : []) {
++    for (const model of Array.isArray(rows) ? rows.slice(0, 18) : []) {
 +      if (!model || typeof model !== 'object' || Array.isArray(model) ||
 +          !Object.prototype.hasOwnProperty.call(model, 'map_id') || typeof model.map_id !== 'string' ||
-+          !Object.prototype.hasOwnProperty.call(mapNames, model.map_id) ||
-+          !Object.prototype.hasOwnProperty.call(model, 'match_type') || model.match_type !== 'mixed' || available.has(model.map_id)) continue;
++          !Object.prototype.hasOwnProperty.call(mapNames, model.map_id) || available.has(model.map_id) ||
++          !latestTraining && (!Object.prototype.hasOwnProperty.call(model, 'match_type') || model.match_type !== 'mixed')) continue;
 +      available.set(model.map_id, model);
 +    }
      const models = byId('models'); models.replaceChildren();
 -    for (const model of Array.isArray(status.models) ? status.models.slice(0, 18) : []) {
 -      if (!model || !Object.prototype.hasOwnProperty.call(mapNames, model.map_id) ||
 -          !['normal', 'competitive'].includes(model.match_type)) continue;
-+    for (const [mapId, mapName] of Object.entries(mapNames)) {
-+      const model = available.get(mapId);
-       const item = document.createElement('li'), name = document.createElement('span'), detail = document.createElement('span');
+-      const item = document.createElement('li'), name = document.createElement('span'), detail = document.createElement('span');
 -      name.textContent = `${mapNames[model.map_id]} · ${modes[model.match_type]}`;
 -      detail.textContent = `${count(model.sample_count)} 条圈样本 / ${count(model.training_match_count)} 场独立比赛 · ${model.validation_available ? '有独立验证' : '尚无独立验证'}`;
-+      name.textContent = mapName;
-+      detail.textContent = model
-+        ? `${count(model.sample_count)} 条可用样本 / ${count(model.training_match_count)} 场训练比赛 / ${count(model.validation_match_count)} 场验证比赛 · ${model.validation_available === true ? '有原版留出指标' : '暂无原版留出指标'}`
-+        : '暂无可用原版统计模型';
-       item.append(name, detail); models.append(item);
-     }
+-      item.append(name, detail); models.append(item);
+-    }
 -    if (!models.childElementCount) {
 -      const item = document.createElement('li'); item.textContent = '暂无可用 KNN 样本；仅使用已校准的圈型估计，无法判断时暂不显示。'; models.append(item);
 -    }
++    for (const [mapId, mapName] of Object.entries(mapNames)) {
++      const model = available.get(mapId);
++      const matches = model ? latestTraining ? model.effective_training_matches : model.training_match_count : 0;
++      const percent = latestTraining && model && model.policy === 'native-heldout-containment-v1' && model.quality_state === 'ready' &&
++        Number.isSafeInteger(model.validation_match_count) && model.validation_match_count >= 5 &&
++        Number.isFinite(model.confidence_percent) && model.confidence_percent >= 0 && model.confidence_percent <= 100
++        ? model.confidence_percent : null;
++      const item = document.createElement('li'), name = document.createElement('span');
++      const training = document.createElement('span'), confidence = document.createElement('span');
++      name.textContent = mapName;
++      training.textContent = `有效训练 ${count(matches)} 场`;
++      confidence.textContent = `模型可信度 ${percent === null ? '待验证' : percent.toLocaleString(undefined, {maximumFractionDigits: 1}) + '%'}`;
++      item.append(name, training, confidence);
++      if (percent !== null) {
++        const meter = document.createElement('progress'); meter.max = 100; meter.value = percent;
++        if (typeof meter.setAttribute === 'function') meter.setAttribute('aria-label', mapName + '模型可信度');
++        item.append(meter);
++      }
++      models.append(item);
++    }
 +  }
 +  function applyStatusMode(status, sequence) {
 +    if (saving || pendingMode || sequence < appliedRead ||
@@ -4416,7 +4849,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
    }
    function drainRefresh() {
      if (refreshPending && active && authorized && initialized && !document.hidden && !refreshing && !saving &&
-@@ -189,16 +238,21 @@
+@@ -189,16 +264,21 @@
      if (refreshing) { if (afterWrite) refreshPending = true; return; }
      if (saving && !afterWrite) { refreshPending = true; return; }
      refreshPending = false; refreshing = true; clearTimeout(timer);
@@ -4442,7 +4875,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
    byId('key-form').addEventListener('submit', async event => {
      event.preventDefault();
      if (!authorized || saving) return;
-@@ -248,6 +302,7 @@
+@@ -248,6 +328,7 @@
      if (document.hidden) { resumePending = true; for (const controller of controllers) controller.abort(); }
      else requestResume();
    });
@@ -4450,7 +4883,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
    window.addEventListener('pagehide', () => {
      active = false; resumePending = true; clearTimeout(timer); clearTimeout(authTimer); clearTimeout(reconcileTimer);
      for (const controller of controllers) controller.abort();
-@@ -271,6 +326,7 @@
+@@ -271,6 +352,7 @@
    });
    async function initialize({recovery = false} = {}) {
      if (!active || document.hidden || initializing || initialized) return;
@@ -4458,15 +4891,16 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
      initializing = true; clearTimeout(timer);
      try {
        const session = await request('/session');
-@@ -284,6 +340,7 @@
+@@ -284,6 +366,8 @@
        initialized = true; initFailures = 0; authRequested = false; authAttempts = 0; clearTimeout(authTimer);
        if (firstSync) { initialSettingsSynced = true; notifySettingsChanged(); }
        byId('key-form').hidden = false; setSaving(saving);
++      dismissLogin();
 +      dismissRetry();
        if (pendingMode) {
          if (settings.prediction_mode === pendingMode.mode) {
            pendingMode = null; clearTimeout(reconcileTimer); text('mode-message', '已核对实际模式，保存已确认。');
-@@ -301,7 +358,7 @@
+@@ -301,7 +385,7 @@
        else if (++initFailures <= 5) {
          text('connection', '服务暂不可用，稍后自动重试。');
          timer = setTimeout(initialize, [1000, 3000, 10000, 30000, 30000][initFailures - 1]);
@@ -4475,7 +4909,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
      } finally {
        initializing = false;
        const pending = authCompletionPending; authCompletionPending = 0;
-@@ -310,5 +367,5 @@
+@@ -310,5 +394,5 @@
        drainRefresh();
      }
    }
