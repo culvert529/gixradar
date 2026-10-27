@@ -644,7 +644,19 @@ diff --git a/app/zones/backend/app/main.py b/app/zones/backend/app/main.py
  
      @application.get("/api/settings")
      def settings_summary(request: Request):
-@@ -107,6 +108,7 @@
+@@ -96,8 +97,9 @@
+                                        request.app.state.collector, payload)
+ 
+     @application.get("/api/collector/status")
+-    def collector_status(request: Request):
+-        return request.app.state.collector.status()
++    def collector_status(request: Request, view: str | None = None):
++        collector = request.app.state.collector
++        return collector.status(compact=True) if view == 'ui' else collector.status()
+ 
+     @application.post("/api/collector/run",status_code=202)
+     def collect_once(request: Request):
+@@ -107,6 +109,7 @@
      def predict(body: PredictRequest, request: Request):
          current=request.app.state.settings
          with database_connection(current.database_path) as connection:
@@ -3524,11 +3536,13 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
 +from app.services.pubg_api import PubgApiClient, Cancelled, CollectionDeadline, path_segment, telemetry_url_allowed
  from app.services.telemetry_parser import extract_circles, insert_circles
  from app.services.training import AnalyzerTrainer
+-from app.services.analyzer import ENGINE, ALGORITHM, canonical_mode, model_summaries
+-
+-INTERVAL_SECONDS = 1800
 +from app.services.quality import latest_training_maps
 +from app.services.prequential import score_match, pending_training, acknowledge_training
- from app.services.analyzer import ENGINE, ALGORITHM, canonical_mode, model_summaries
- 
--INTERVAL_SECONDS = 1800
++from app.services.analyzer import ENGINE, ALGORITHM, canonical_mode, model_summaries, scope_native_models
++
 +INTERVAL_SECONDS = 300
 +ERROR_RETRY_DELAYS = (60, 300, 900, 1800)
 +AUTH_BACKOFF_SECONDS = 1800
@@ -3735,7 +3749,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
                  self._expire_retries(connection,stats)
                  due=connection.execute("""SELECT r.match_id FROM collector_retry_meta r
                      LEFT JOIN collector_seen s ON s.match_id=r.match_id
-@@ -242,87 +309,178 @@
+@@ -242,87 +309,206 @@
                          (s.state='failed' AND s.retry_after<=?))
                      ORDER BY COALESCE(s.retry_after,r.first_seen_at),r.match_id LIMIT ?""",
                      (self.clock(),self.clock(),RETRY_BATCH_SIZE)).fetchall()
@@ -3824,6 +3838,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
 -                    self._train_changed(connection,batch_cancel)
 +                    if training_blocked:
 +                        reason="training_blocked";break
++                    known_refs=self._known_sample_refs(connection,client,refs)
 +                    cursor_key="cursor" if not window_index else "sample_cursor:"+str(window_index)
 +                    saved=connection.execute("SELECT value FROM collector_state WHERE key=?",(cursor_key,)).fetchone()
 +                    try:offset=int(saved[0])%len(refs) if saved and refs else 0
@@ -3839,6 +3854,8 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
 +                        if match_id in scanned:
 +                            continue
 +                        scanned.add(match_id);stats["checked"]+=1
++                        if match_id in known_refs:
++                            stats["skipped"]+=1;continue
 +                        row=connection.execute("SELECT * FROM collector_seen WHERE match_id=?",(match_id,)).fetchone()
 +                        reviewed=row and row["state"]=="excluded" and connection.execute(
 +                            "SELECT 1 FROM analyzer_seen WHERE match_id=?",(match_id,)).fetchone()
@@ -3882,6 +3899,10 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
 -            error="COLLECTOR_INTERNAL_ERROR"
 +            error=preferred_error(error,"COLLECTOR_INTERNAL_ERROR");reason="internal_error"
          finally:
++            closer=getattr(client,"close",None)
++            if callable(closer):
++                try:closer()
++                except Exception:pass
              if started:
 +                elapsed=max(0,self.monotonic()-began_monotonic)
 +                retry_after=getattr(client,"retry_after_seconds",0)
@@ -3914,6 +3935,27 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
 +            self._batch_deadline=None
              self.batch_lock.release()
          return not cancelled and error is None
++
++    def _known_sample_refs(self,connection,client,refs):
++        # Small indexed page snapshots remove thousands of per-ID lookups for
++        # old samples. Potential new work still takes the immediate row checks
++        # and the durable writer gate below; no prediction uses this snapshot.
++        known=set()
++        for start in range(0,len(refs),400):
++            self._check_budget(client)
++            page=refs[start:start+400]
++            placeholders=",".join("(?)" for _ in page)
++            rows=connection.execute("""WITH refs(match_id) AS (VALUES """+placeholders+""")
++                SELECT refs.match_id FROM refs
++                LEFT JOIN collector_seen s ON s.match_id=refs.match_id
++                LEFT JOIN analyzer_seen a ON a.match_id=refs.match_id
++                LEFT JOIN collector_retry_meta r ON r.match_id=refs.match_id
++                WHERE s.state IN ('completed','failed') OR
++                    (s.state='excluded' AND a.match_id IS NOT NULL) OR
++                    (s.match_id IS NULL AND r.match_id IS NOT NULL)""",page).fetchall()
++            known.update(row[0] for row in rows)
++            self._check_budget(client)
++        return known
 +
 +    def _check_budget(self,client):
 +        self._check_cancelled(client)
@@ -3966,7 +4008,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
  
      def _check_cancelled(self,client):
          client.check_cancelled()
-@@ -331,12 +489,14 @@
+@@ -331,12 +517,14 @@
  
      def _process_match(self,connection,client,match_id,names,stats):
          try:
@@ -3982,7 +4024,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
              data=metadata.get("data") if isinstance(metadata,dict) else None
              if not isinstance(data,dict) or not isinstance(data.get("id"),str) or not data["id"].strip():
                  raise AppError("PUBG_RESPONSE_INVALID","Official match data is incomplete",502)
-@@ -366,11 +526,13 @@
+@@ -366,11 +554,13 @@
              if not telemetry_url_allowed(url):
                  self._seen(connection,match_id,"excluded",code="TELEMETRY_ORIGIN_REJECTED")
                  connection.commit();stats["skipped"]+=1;return None
@@ -3997,7 +4039,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
              ended=not circles and any(isinstance(event,dict) and event.get("_T")=="LogMatchEnd" for event in events)
              del events,metadata,url
              if not circles:
-@@ -378,11 +540,55 @@
+@@ -378,11 +568,55 @@
                      raise AppError("PUBG_RESPONSE_INVALID","Official circle data is incomplete",502)
                  self._seen(connection,match_id,"excluded",code="NO_VALID_CIRCLES")
                  connection.commit();stats["skipped"]+=1;return None
@@ -4053,11 +4095,13 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
          except Cancelled:
              connection.rollback();raise
          except AppError as exc:
-@@ -462,18 +668,142 @@
+@@ -462,18 +696,148 @@
      def _train_changed(self, connection, cancel):
          if cancel.is_set() or self.stop_event.is_set():
              raise Cancelled()
 -        AnalyzerTrainer(connection, self.config, self.settings.model_dir, cancel).sync_all()
+-
+-    def status(self):
 +        def check():
 +            if cancel.is_set() or self.stop_event.is_set():
 +                raise Cancelled()
@@ -4172,8 +4216,8 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
 +            with self.guard:
 +                self._quality_running=False;self.running=False
 +            self.batch_lock.release()
- 
-     def status(self):
++
++    def status(self, *, compact=False):
          with self.guard:
              result={"enabled":True,"api_key_configured":bool(self.settings.pubg_api_key),"running":self.running,
 -                    "interval_minutes":30,"batch_size":20,"next_run_at":iso(self.next_run_at),
@@ -4193,8 +4237,15 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
 +            connection.execute("BEGIN")
              result["total_matches"]=connection.execute("SELECT COUNT(*) FROM matches m WHERE EXISTS(SELECT 1 FROM circle_phases c WHERE c.match_id=m.match_id)").fetchone()[0]
              result["total_circles"]=connection.execute("SELECT COUNT(*) FROM circle_phases").fetchone()[0]
-             result["models"],result["supported_stages"]=model_summaries(connection,self.config,self.settings.model_dir)
-+            result["training_maps"]=latest_training_maps(connection,self.config,self.settings.model_dir)
+-            result["models"],result["supported_stages"]=model_summaries(connection,self.config,self.settings.model_dir)
++            if compact:
++                # Keep the same native model scope as the full reader; the web
++                # view omits unused availability/profile scans, not validation.
++                scope_native_models(connection)
++                result["training_maps"]=latest_training_maps(connection,self.config,self.settings.model_dir,compact=True)
++            else:
++                result["models"],result["supported_stages"]=model_summaries(connection,self.config,self.settings.model_dir)
++                result["training_maps"]=latest_training_maps(connection,self.config,self.settings.model_dir)
              result["engine"]=ENGINE
              result["algorithm"]=ALGORITHM
          finally:
@@ -4863,16 +4914,43 @@ diff --git a/app/zones/backend/app/services/pubg_api.py b/app/zones/backend/app/
          raise AppError("INVALID_MATCH_REFERENCE", "Official match reference is invalid")
      return value
  
-@@ -38,6 +45,8 @@
+@@ -37,26 +44,76 @@
+         self.stop_event = stop_event or threading.Event()
          self.transport = transport
          self._active = None
++        self._closed = False
          self._lock = threading.Lock()
 +        self.deadline_check = None
 +        self.retry_after_seconds = 0
  
      def cancel(self) -> None:
          self.stop_event.set()
-@@ -53,10 +62,40 @@
++        self.close()
++
++    def close(self) -> None:
+         with self._lock:
+             active = self._active
++            self._active = None
++            self._closed = True
+         if active is not None:
+             try:
+                 active.close()
+             except Exception:
+                 pass
+ 
++    def _http_client(self):
++        # A collector owns one sequential batch. Keep sockets/TLS sessions for
++        # its public requests, then release the complete pool in close().
++        with self._lock:
++            self.check_cancelled()
++            if self._closed:
++                raise Cancelled()
++            if self._active is None:
++                self._active=httpx.Client(timeout=self.timeout,follow_redirects=False,
++                    transport=self.transport,trust_env=False)
++            return self._active
++
+     def check_cancelled(self) -> None:
          if self.stop_event.is_set():
              raise Cancelled()
  
@@ -4915,7 +4993,7 @@ diff --git a/app/zones/backend/app/services/pubg_api.py b/app/zones/backend/app/
  
      def match(self, match_id: str) -> dict:
          return self._json(API_ORIGIN + "/shards/steam/matches/" + path_segment(match_id), limit=4*1024*1024)
-@@ -68,7 +107,7 @@
+@@ -68,47 +125,50 @@
          return value
  
      def _json(self, url: str, *, authenticated: bool = False, limit: int, expected= dict):
@@ -4924,41 +5002,81 @@ diff --git a/app/zones/backend/app/services/pubg_api.py b/app/zones/backend/app/
          headers = {"Accept": "application/vnd.api+json", "Accept-Encoding": "gzip"}
          if authenticated:
              # This branch is used only by the literal official samples URL.
-@@ -80,9 +119,10 @@
-                               transport=self.transport, trust_env=False) as client:
-                 with self._lock:
-                     self._active = client
+             if urlsplit(url).netloc != "api.pubg.com":
+                 raise AppError("API_ORIGIN_REJECTED", "Unsupported official API origin", 502)
+             headers["Authorization"] = "Bearer " + self._key
++        client=None
+         try:
+-            with httpx.Client(timeout=self.timeout, follow_redirects=False,
+-                              transport=self.transport, trust_env=False) as client:
+-                with self._lock:
+-                    self._active = client
 -                self.check_cancelled()
-+                self._check_request()
-                 with client.stream("GET", url, headers=headers) as response:
-                     if response.status_code == 429:
-+                        self.retry_after_seconds=max(self.retry_after_seconds,self._retry_after(response.headers))
-                         raise AppError("PUBG_RATE_LIMITED", "Official API rate limit reached", 503)
-                     # Public match/telemetry denials do not test the saved Key.
-                     if authenticated and response.status_code in (401,403):
-@@ -92,14 +132,15 @@
-                     chunks = bytearray()
-                     deadline = time.monotonic() + 90
-                     for chunk in response.iter_bytes():
+-                with client.stream("GET", url, headers=headers) as response:
+-                    if response.status_code == 429:
+-                        raise AppError("PUBG_RATE_LIMITED", "Official API rate limit reached", 503)
+-                    # Public match/telemetry denials do not test the saved Key.
+-                    if authenticated and response.status_code in (401,403):
+-                        raise AppError("PUBG_AUTH_REJECTED", "Official API rejected authentication", 503)
+-                    if response.status_code != 200:
+-                        raise AppError("PUBG_HTTP_ERROR", "Official data request failed", 502)
+-                    chunks = bytearray()
+-                    deadline = time.monotonic() + 90
+-                    for chunk in response.iter_bytes():
 -                        self.check_cancelled()
-+                        self._check_request()
-                         if time.monotonic() > deadline:
-                             raise AppError("PUBG_REQUEST_TIMEOUT", "Official data request timed out", 502)
-                         chunks.extend(chunk)
-                         if len(chunks) > limit:
-                             raise AppError("PUBG_RESPONSE_TOO_LARGE", "Official response exceeded its limit", 502)
+-                        if time.monotonic() > deadline:
+-                            raise AppError("PUBG_REQUEST_TIMEOUT", "Official data request timed out", 502)
+-                        chunks.extend(chunk)
+-                        if len(chunks) > limit:
+-                            raise AppError("PUBG_RESPONSE_TOO_LARGE", "Official response exceeded its limit", 502)
 -                self.check_cancelled()
-+                self._check_request()
-                 payload = json.loads(chunks)
-+                self._check_request()
-                 del chunks
+-                payload = json.loads(chunks)
+-                del chunks
++            client=self._http_client()
++            # Pooling must never turn a provider Set-Cookie into credentials on
++            # later public match/CDN requests, including same-domain requests.
++            client.cookies.clear()
++            self._check_request()
++            with client.stream("GET", url, headers=headers) as response:
++                if response.status_code == 429:
++                    self.retry_after_seconds=max(self.retry_after_seconds,self._retry_after(response.headers))
++                    raise AppError("PUBG_RATE_LIMITED", "Official API rate limit reached", 503)
++                # Public match/telemetry denials do not test the saved Key.
++                if authenticated and response.status_code in (401,403):
++                    raise AppError("PUBG_AUTH_REJECTED", "Official API rejected authentication", 503)
++                if response.status_code != 200:
++                    raise AppError("PUBG_HTTP_ERROR", "Official data request failed", 502)
++                chunks = bytearray()
++                deadline = time.monotonic() + 90
++                for chunk in response.iter_bytes():
++                    self._check_request()
++                    if time.monotonic() > deadline:
++                        raise AppError("PUBG_REQUEST_TIMEOUT", "Official data request timed out", 502)
++                    chunks.extend(chunk)
++                    if len(chunks) > limit:
++                        raise AppError("PUBG_RESPONSE_TOO_LARGE", "Official response exceeded its limit", 502)
++            self._check_request()
++            payload = json.loads(chunks)
++            self._check_request()
++            del chunks
          except (httpx.HTTPError, OSError, RuntimeError) as error:
              self.check_cancelled()
+             raise AppError("PUBG_TRANSPORT_ERROR", "Official data request failed", 502) from error
+         except (ValueError, UnicodeError) as error:
+             raise AppError("PUBG_RESPONSE_INVALID", "Official data response is invalid", 502) from error
+         finally:
+-            with self._lock:
+-                self._active = None
++            if client is not None:
++                client.cookies.clear()
+         if not isinstance(payload, expected):
+             raise AppError("PUBG_RESPONSE_INVALID", "Official data response has an invalid shape", 502)
+         return payload
 diff --git a/app/zones/backend/app/services/quality.py b/app/zones/backend/app/services/quality.py
 new file mode 100644
 --- /dev/null
 +++ b/app/zones/backend/app/services/quality.py
-@@ -0,0 +1,680 @@
+@@ -0,0 +1,690 @@
 +"""Optional historical coverage of the latest original training artifact.
 +
 +This is pooled held-out case coverage, not a future-circle probability. Native
@@ -5228,13 +5346,15 @@ new file mode 100644
 +        raise
 +
 +
-+def latest_training_maps(connection, config, model_dir):
++def latest_training_maps(connection, config, model_dir, *, compact=False):
 +    """Latest completed valid native run per map; cached quality only, no fit."""
 +    native = native_config()
-+    known = {entry['map_id'] for entry in native.list_maps()}
++    entries = native.list_maps()
++    known = {entry['map_id'] for entry in entries}
 +    result = {map_id:{'map_id':map_id,'model_run_id':None,'effective_training_matches':0,
 +        'confidence_percent':None,'validation_match_count':0,'validation_case_count':0,'hit_count':0,
 +        'quality_state':'pending','trained_at':None,'policy':POLICY} for map_id in known}
++    rows = None
 +    try:
 +        rows = connection.execute(_RUNS_SQL+' ORDER BY r.created_at DESC,r.id DESC',(UPSTREAM_COMMIT,ALGORITHM)).fetchall()
 +        found = set()
@@ -5247,18 +5367,25 @@ new file mode 100644
 +                continue
 +            found.add(map_id)
 +            result[map_id] = _base(row,map_id)
-+            cached = _cached(connection,row,map_id)
-+            if cached is not None:
-+                result[map_id] = _public(cached,row,map_id)
++            if not compact:
++                cached = _cached(connection,row,map_id)
++                if cached is not None:
++                    result[map_id] = _public(cached,row,map_id)
 +    except (sqlite3.Error, OSError, ValueError, TypeError):
 +        # Optional metadata failure must not break the existing collector GET.
 +        pass
-+    for entry in native.list_maps():
-+        result[entry['map_id']]['modes'] = _read_serving_modes(connection,model_dir,entry['map_id'])
++    for entry in entries:
++        result[entry['map_id']]['modes'] = _read_serving_modes(connection,model_dir,entry['map_id'],latest_rows=rows)
 +        from app.services.prequential import rolling_quality
 +        for mode,value in result[entry['map_id']]['modes'].items():
 +            value['rolling'] = rolling_quality(connection,entry['map_id'],mode)
-+    return [result[entry['map_id']] for entry in native.list_maps()]
++    if compact:
++        fields = ('policy','map_id','match_type','model_run_id','training_scope','evaluation_kind','quality_state',
++                  'latest_model_run_id','latest_effective_training_matches','rolling')
++        return [{'map_id':entry['map_id'],'model_run_id':result[entry['map_id']]['model_run_id'],
++                 'modes':{mode:{key:value[key] for key in fields}
++                          for mode,value in result[entry['map_id']]['modes'].items()}} for entry in entries]
++    return [result[entry['map_id']] for entry in entries]
 +
 +
 +SERVING_POLICY = 'native-serving-mode-v2'
@@ -5604,7 +5731,7 @@ new file mode 100644
 +    return True
 +
 +
-+def _read_serving_modes(connection,model_dir,map_id):
++def _read_serving_modes(connection,model_dir,map_id,*,latest_rows=None):
 +    row = None
 +    try:
 +        row = _served_row(connection,model_dir,map_id)
@@ -5622,8 +5749,9 @@ new file mode 100644
 +                    result[mode] = payload
 +            except (ValueError,TypeError,KeyError):
 +                pass
-+        latest_rows = connection.execute(_RUNS_SQL+' ORDER BY r.created_at DESC,r.id DESC',
-+                                         (UPSTREAM_COMMIT,ALGORITHM)).fetchall()
++        if latest_rows is None:
++            latest_rows = connection.execute(_RUNS_SQL+' ORDER BY r.created_at DESC,r.id DESC',
++                                             (UPSTREAM_COMMIT,ALGORITHM)).fetchall()
 +        for latest in latest_rows:
 +            if _map_id(latest,{map_id})!=map_id or artifact_reference(connection,model_dir,latest['id']) is None:
 +                continue
@@ -6273,7 +6401,7 @@ diff --git a/app/zones/web/index.html b/app/zones/web/index.html
 @@ -1,9 +1,18 @@
  <!doctype html>
 -<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=51aaa647d57f"><script defer src="/zones/settings.js?v=6b6d487fea36"></script></head>
-+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=c81b6ea1f593"><script defer src="/zones/settings.js?v=abe696a0060a"></script></head>
++<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=c81b6ea1f593"><script defer src="/zones/settings.js?v=75b0328e9a28"></script></head>
  <body><main>
 -<p id="connection" class="muted" role="status">正在读取圈型预测状态…</p>
 -<section><h1>Circle Analyzer / KNN</h1><label for="prediction-mode">对局模式</label><select id="prediction-mode" disabled><option value="auto">自动</option><option value="normal">普通匹配</option><option value="competitive">竞技排位</option></select><p id="mode-message" role="status"></p><p class="muted">自动模式无法区分圈型时，可手动选择实际对局模式。</p></section>
@@ -6319,15 +6447,23 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
    const controllers = new Set();
    let timer = null, active = true, authorized = false, saving = false, refreshing = false, refreshPending = false;
    let initialized = false, initializing = false, initFailures = 0, predictionMode = 'auto';
-@@ -8,6 +11,7 @@
+@@ -8,8 +11,14 @@
    let writeEpoch = 0, readSequence = 0, appliedRead = 0, pendingMode = null, reconcileTimer = null, reconciling = false;
    let resumePending = false, resuming = false;
    let initialSettingsSynced = false;
 +  let retryOffered = false, retrying = false;
++  let modelList = null;
++  const modelCards = new Map();
    const modes = { auto: '自动', normal: '普通匹配', competitive: '竞技排位' };
-   const text = (id, value) => { byId(id).textContent = value; };
+-  const text = (id, value) => { byId(id).textContent = value; };
++  const text = (id, value) => {
++    const element = byId(id);
++    if (element.textContent !== String(value)) element.textContent = value;
++  };
    const count = value => Number.isSafeInteger(value) && value >= 0 ? value.toLocaleString() : '—';
-@@ -28,6 +32,38 @@
+   const time = value => {
+     if (typeof value !== 'string') return '—';
+@@ -28,6 +37,38 @@
        return await response.json();
      } finally { clearTimeout(timeout); controllers.delete(controller); }
    }
@@ -6366,7 +6502,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
    function postParent(data) {
      if (!window.parent || window.parent === window || !window.location || typeof window.parent.postMessage !== 'function') return;
      window.parent.postMessage(data, window.location.origin);
-@@ -36,7 +72,7 @@
+@@ -36,7 +77,7 @@
      clearTimeout(authTimer);
      if (!active || document.hidden) return;
      if (!completionHint && authAttempts >= 5) {
@@ -6375,7 +6511,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
      }
      const requestId = authRequestId;
      authTimer = setTimeout(() => {
-@@ -51,7 +87,8 @@
+@@ -51,7 +92,8 @@
      authorized = false; initialized = false; clearTimeout(timer); clearTimeout(reconcileTimer); reconcileTimer = null;
      byId('key-form').hidden = true;
      byId('prediction-mode').disabled = true;
@@ -6385,7 +6521,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
      if (!authRequested) {
        authRequested = true; authReplySeen = false; authRequestId = authRequestId % 1000000 + 1;
        postParent({type: 'gixradar:session-request', version: 1, requestId: authRequestId});
-@@ -63,6 +100,8 @@
+@@ -63,6 +105,8 @@
          !Object.prototype.hasOwnProperty.call(modes, settings.prediction_mode)) throw new Error('Invalid settings');
      predictionMode = settings.prediction_mode; byId('prediction-mode').value = predictionMode;
      text('configured', settings.pubg_api_key_configured ? '已配置（不会回显）' : '尚未配置');
@@ -6394,7 +6530,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
    }
    function setSaving(value) {
      saving = value; byId('save-key').disabled = value;
-@@ -77,23 +116,27 @@
+@@ -77,23 +121,27 @@
    async function resumeWhenReady() {
      if (!resumePending || !active || document.hidden || resuming || initializing || refreshing || saving || reconciling) return;
      resumePending = false; resuming = true;
@@ -6425,7 +6561,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
        drainRefresh();
      }
    }
-@@ -102,7 +145,12 @@
+@@ -102,7 +150,12 @@
    }
    async function readSettings(version, notify = false) {
      const sequence = ++readSequence;
@@ -6439,7 +6575,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
      if (!active || version !== writeEpoch || sequence < appliedRead) return null;
      const changed = result.prediction_mode !== predictionMode;
      applySettings(result); appliedRead = sequence;
-@@ -147,38 +195,153 @@
+@@ -147,38 +200,190 @@
        void resumeWhenReady();
      }
    }
@@ -6451,21 +6587,51 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
 +    for (const row of Array.isArray(status.training_maps) ? status.training_maps.slice(0, 18) : []) {
 +      if (record(row) && own(row, 'map_id') && typeof row.map_id === 'string' && own(mapNames, row.map_id) && !training.has(row.map_id)) training.set(row.map_id, row);
 +    }
-+    const node = (tag, className, value) => {
-+      const element = document.createElement(tag); element.className = className;
-+      if (value !== undefined) element.textContent = value;
-+      return element;
++    const fields = (object, names) => {
++      if (!record(object)) return null;
++      return names.map(key => {
++        if (!own(object, key)) return ['missing'];
++        const value = object[key], type = typeof value;
++        if (value === null) return ['null'];
++        if (type === 'number') return [type, Number.isFinite(value) ? value : String(value)];
++        return type === 'string' || type === 'boolean' ? [type, value] : [type];
++      });
 +    };
-+    const list = byId('models'); list.replaceChildren();
++    const signature = row => JSON.stringify([
++      fields(row, ['model_run_id']),
++      ...['normal', 'competitive'].map(matchType => {
++        const candidate = row && own(row, 'modes') && record(row.modes) && own(row.modes, matchType) ? row.modes[matchType] : null;
++        const rolling = record(candidate) && own(candidate, 'rolling') && record(candidate.rolling) ? candidate.rolling : null;
++        return [fields(candidate, ['policy', 'map_id', 'match_type', 'model_run_id', 'training_scope',
++          'evaluation_kind', 'quality_state', 'latest_model_run_id', 'latest_effective_training_matches']),
++          fields(rolling, ['policy', 'map_id', 'match_type', 'window_size', 'stage_score_rule', 'match_score_rule',
++            'window_score_rule', 'order_policy', 'history_scope', 'epoch_started_at']),
++          ...['next', 'final'].map(kind => fields(rolling && own(rolling, kind) ? rolling[kind] : null,
++            ['quality_state', 'evaluated_matches', 'total_match_score', 'mean_match_iou', 'confidence_percent']))];
++      })
++    ]);
++    const list = byId('models');
++    if (modelList !== list) { modelCards.clear(); modelList = list; list.replaceChildren(); }
 +    for (const [mapId, mapName] of Object.entries(mapNames)) {
 +      const row = training.get(mapId);
-+      const item = node('li', 'model-card'); item.append(node('span', 'model-name', mapName));
++      const nextSignature = signature(row), cached = modelCards.get(mapId);
++      if (cached && cached.signature === nextSignature) continue;
++      const nodes = cached ? cached.nodes : [];
++      let index = 0;
++      const node = (tag, className, value) => {
++        let element = nodes[index++];
++        if (!element) { element = document.createElement(tag); element.className = className; nodes.push(element); }
++        if (value !== undefined && element.textContent !== String(value)) element.textContent = value;
++        return element;
++      };
++      const append = (parent, ...children) => { if (!cached) parent.append(...children); };
++      const item = node('li', 'model-card'); append(item, node('span', 'model-name', mapName));
 +      const table = node('table', 'model-table'), head = node('thead', ''), columns = node('tr', 'model-columns');
 +      if (typeof table.setAttribute === 'function') table.setAttribute('aria-label', mapName + '训练场次和平均重合度');
 +      for (const label of ['模式', '训练场次', '下一圈', '最终圈']) {
-+        const column = node('th', '', label); column.scope = 'col'; columns.append(column);
++        const column = node('th', '', label); column.scope = 'col'; append(columns, column);
 +      }
-+      head.append(columns); table.append(head);
++      append(head, columns); append(table, head);
 +      const groups = node('tbody', 'model-modes');
 +      for (const matchType of ['normal', 'competitive']) {
 +        const candidate = row && own(row, 'modes') && record(row.modes) && own(row.modes, matchType) ? row.modes[matchType] : null;
@@ -6478,7 +6644,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
 +        const group = node('tr', 'model-mode model-mode-' + matchType);
 +        const modeName = node('th', 'model-mode-name', matchType === 'normal' ? '普通' : '竞技'); modeName.scope = 'row';
 +        if (typeof modeName.setAttribute === 'function') modeName.setAttribute('aria-label', modes[matchType]);
-+        group.append(modeName);
++        append(group, modeName);
 +        const latest = metadata && own(candidate, 'latest_model_run_id') && own(candidate, 'latest_effective_training_matches') &&
 +          own(row, 'model_run_id') && candidate.latest_model_run_id === row.model_run_id &&
 +          (typeof candidate.latest_model_run_id === 'string' && candidate.latest_model_run_id.length > 0 && candidate.latest_model_run_id.length <= 200 ||
@@ -6488,7 +6654,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
 +        const sourceCell = node('td', 'model-training', source);
 +        sourceCell.title = !latest ? '最新训练场次待统计' : candidate.latest_effective_training_matches === null ? '最新训练来源未记录'
 +          : '最新训练 ' + count(candidate.latest_effective_training_matches) + ' 场';
-+        group.append(sourceCell);
++        append(group, sourceCell);
 +        const rolling = record(candidate) && own(candidate, 'rolling') && record(candidate.rolling) ? candidate.rolling : null;
 +        const rollingMetadata = rolling && ['policy', 'map_id', 'match_type', 'window_size', 'stage_score_rule',
 +          'match_score_rule', 'window_score_rule', 'order_policy', 'history_scope', 'epoch_started_at'].every(key => own(rolling, key)) &&
@@ -6518,13 +6684,14 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
 +            rate.setAttribute('aria-label', mapName + modes[matchType] + label + display);
 +            rate.setAttribute('data-empty', String(percent === null));
 +          }
-+          circle.append(rate);
-+          circle.append(node('small', 'model-validation', valid ? `已测 ${count(result.evaluated_matches)} 场` : '等待新评测数据'));
-+          group.append(circle);
++          append(circle, rate);
++          append(circle, node('small', 'model-validation', valid ? `已测 ${count(result.evaluated_matches)} 场` : '等待新评测数据'));
++          append(group, circle);
 +        }
-+        groups.append(group);
++        append(groups, group);
 +      }
-+      table.append(groups); item.append(table); list.append(item);
++      append(table, groups); append(item, table); append(list, item);
++      modelCards.set(mapId, { signature: nextSignature, nodes });
 +    }
 +  }
    function render(status) {
@@ -6581,16 +6748,20 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
 -    }
 +    const qualityStatus = byId('quality-state'), qualityError = byId('quality-error');
 +    if (qualityStatus) {
-+      qualityStatus.textContent = qualityState === 'running' ? '正在更新训练诊断'
++      let value = qualityState === 'running' ? '正在更新训练诊断'
 +        : qualityState === 'pending' ? '等待更新训练诊断'
 +        : qualityState === 'error' ? '诊断失败，等待重试'
 +        : qualityState === 'idle' ? '暂无待处理诊断' : '诊断状态待更新';
 +      if (qualityState === 'error' && typeof quality.next_retry_at === 'string' && time(quality.next_retry_at) !== '—') {
-+        qualityStatus.textContent += ' · 下次重试 ' + time(quality.next_retry_at);
++        value += ' · 下次重试 ' + time(quality.next_retry_at);
 +      }
++      if (qualityStatus.textContent !== value) qualityStatus.textContent = value;
 +    }
-+    if (qualityError) qualityError.textContent = qualityState === 'error' || qualityState && quality.last_error_code === 'ANALYZER_QUALITY_FAILED'
-+      ? '训练诊断更新失败，系统会单独重试。' : '';
++    if (qualityError) {
++      const value = qualityState === 'error' || qualityState && quality.last_error_code === 'ANALYZER_QUALITY_FAILED'
++        ? '训练诊断更新失败，系统会单独重试。' : '';
++      if (qualityError.textContent !== value) qualityError.textContent = value;
++    }
 +    renderModels(status);
 +  }
 +  function applyStatusMode(status, sequence) {
@@ -6598,7 +6769,9 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
 +        !Object.prototype.hasOwnProperty.call(status, 'prediction_mode') || typeof status.prediction_mode !== 'string' ||
 +        !Object.prototype.hasOwnProperty.call(modes, status.prediction_mode)) return;
 +    const changed = status.prediction_mode !== predictionMode;
-+    predictionMode = status.prediction_mode; byId('prediction-mode').value = predictionMode; appliedRead = sequence;
++    predictionMode = status.prediction_mode;
++    if (byId('prediction-mode').value !== predictionMode) byId('prediction-mode').value = predictionMode;
++    appliedRead = sequence;
 +    if (changed) notifySettingsChanged();
    }
    function schedule() {
@@ -6611,19 +6784,20 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
    }
    function drainRefresh() {
      if (refreshPending && active && authorized && initialized && !document.hidden && !refreshing && !saving &&
-@@ -189,16 +352,21 @@
+@@ -189,16 +394,21 @@
      if (refreshing) { if (afterWrite) refreshPending = true; return; }
      if (saving && !afterWrite) { refreshPending = true; return; }
      refreshPending = false; refreshing = true; clearTimeout(timer);
 -    const version = writeEpoch;
-+    const version = writeEpoch, sequence = ++readSequence;
-     try {
-       const status = await request('/collector/status');
+-    try {
+-      const status = await request('/collector/status');
 -      if (active && version === writeEpoch) { render(status); text('connection', '状态已连接。'); }
--    } catch (error) {
--      if (!active || document.hidden || version !== writeEpoch) return;
++    const version = writeEpoch, sequence = ++readSequence;
++    try {
++      const status = await request('/collector/status?view=ui');
 +      if (active && version === writeEpoch && sequence >= appliedRead) { render(status); applyStatusMode(status, sequence); text('connection', '状态已连接。'); }
-+    } catch (error) {
+     } catch (error) {
+-      if (!active || document.hidden || version !== writeEpoch) return;
 +      if (!active || document.hidden || version !== writeEpoch || sequence < appliedRead) return;
        if (error.status === 401 || error.status === 403) sessionRequired();
        else text('connection', '状态暂不可用，稍后自动刷新。');
@@ -6637,7 +6811,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
    byId('key-form').addEventListener('submit', async event => {
      event.preventDefault();
      if (!authorized || saving) return;
-@@ -248,6 +416,7 @@
+@@ -248,6 +458,7 @@
      if (document.hidden) { resumePending = true; for (const controller of controllers) controller.abort(); }
      else requestResume();
    });
@@ -6645,7 +6819,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
    window.addEventListener('pagehide', () => {
      active = false; resumePending = true; clearTimeout(timer); clearTimeout(authTimer); clearTimeout(reconcileTimer);
      for (const controller of controllers) controller.abort();
-@@ -271,6 +440,7 @@
+@@ -271,6 +482,7 @@
    });
    async function initialize({recovery = false} = {}) {
      if (!active || document.hidden || initializing || initialized) return;
@@ -6653,7 +6827,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
      initializing = true; clearTimeout(timer);
      try {
        const session = await request('/session');
-@@ -284,6 +454,8 @@
+@@ -284,6 +496,8 @@
        initialized = true; initFailures = 0; authRequested = false; authAttempts = 0; clearTimeout(authTimer);
        if (firstSync) { initialSettingsSynced = true; notifySettingsChanged(); }
        byId('key-form').hidden = false; setSaving(saving);
@@ -6662,7 +6836,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
        if (pendingMode) {
          if (settings.prediction_mode === pendingMode.mode) {
            pendingMode = null; clearTimeout(reconcileTimer); text('mode-message', '已核对实际模式，保存已确认。');
-@@ -301,7 +473,7 @@
+@@ -301,7 +515,7 @@
        else if (++initFailures <= 5) {
          text('connection', '服务暂不可用，稍后自动重试。');
          timer = setTimeout(initialize, [1000, 3000, 10000, 30000, 30000][initFailures - 1]);
@@ -6671,7 +6845,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
      } finally {
        initializing = false;
        const pending = authCompletionPending; authCompletionPending = 0;
-@@ -310,5 +482,5 @@
+@@ -310,5 +524,5 @@
        drainRefresh();
      }
    }
