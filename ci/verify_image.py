@@ -43,6 +43,11 @@ QUALITY_ADDITIONS = frozenset({
     "app/zones/backend/app/services/quality.py",
     "app/zones/backend/app/db/migrations/013_model_quality.sql",
 })
+QUEUE_ADDITIONS = frozenset({
+    "app/zones/backend/app/services/sample_queue.py",
+    "app/zones/backend/app/db/migrations/016_sample_queue.sql",
+})
+
 MORSE_COMMIT = "d4a93564e4f7230be397f5c60bfe8d968931a178"
 
 
@@ -80,18 +85,20 @@ def verify_context(manifest_path, expected_release):
     need(manifest.get("source_release_sha256") == expected_release, "SOURCE_RELEASE_MISMATCH")
     installed, build = entries(manifest["files"]), entries(manifest["build_files"])
     revision = manifest.get("runtime_revision")
-    need(revision in {None, "cleanup1", "clock1", "profiles1", "settings1", "config1", "errors1", "accuracy1", "morse1", "morse3", "morse4", "morse6", "morse7", "morse8", "morse9", "morse10", "morse11", "morse12"}, "UNSUPPORTED_RUNTIME_REVISION")
-    app_count = 997 if revision is None else (1012 if revision in {"morse9", "morse10", "morse11", "morse12"} else (1010 if revision == "morse8" else (1009 if revision == "morse7" else (1007 if revision in {"morse1", "morse3", "morse4", "morse6"} else 996))))
+    need(revision in {None, "cleanup1", "clock1", "profiles1", "settings1", "config1", "errors1", "accuracy1", "morse1", "morse3", "morse4", "morse6", "morse7", "morse8", "morse9", "morse10", "morse11", "morse12", "morse13"}, "UNSUPPORTED_RUNTIME_REVISION")
+    app_count = 1014 if revision == "morse13" else (997 if revision is None else (1012 if revision in {"morse9", "morse10", "morse11", "morse12", "morse13"} else (1010 if revision == "morse8" else (1009 if revision == "morse7" else (1007 if revision in {"morse1", "morse3", "morse4", "morse6"} else 996)))))
     need(len(installed) == app_count + 5 and len(build) == app_count + 31, "BASELINE_FILE_COUNTS")
     need(sum(n.startswith("app/") for n in installed) == app_count and
          sum(n.startswith("container/") for n in installed) == 5, "INSTALLED_ROOT_COUNTS")
     need(all(name in build and build[name] == item for name, item in installed.items()), "INSTALLED_NOT_IN_BUILD")
-    if revision in {"morse1", "morse3", "morse4", "morse6", "morse7", "morse8", "morse9", "morse10", "morse11", "morse12"}:
-        additions = MORSE_ADDITIONS | QUALITY_ADDITIONS if revision in {"morse7", "morse8", "morse9", "morse10", "morse11", "morse12"} else MORSE_ADDITIONS
-        if revision in {"morse8", "morse9", "morse10", "morse11", "morse12"}:
+    if revision in {"morse1", "morse3", "morse4", "morse6", "morse7", "morse8", "morse9", "morse10", "morse11", "morse12", "morse13"}:
+        additions = MORSE_ADDITIONS | QUALITY_ADDITIONS if revision in {"morse7", "morse8", "morse9", "morse10", "morse11", "morse12", "morse13"} else MORSE_ADDITIONS
+        if revision in {"morse8", "morse9", "morse10", "morse11", "morse12", "morse13"}:
             additions |= {"app/zones/backend/app/db/migrations/014_serving_quality.sql"}
-        if revision in {"morse9", "morse10", "morse11", "morse12"}:
+        if revision in {"morse9", "morse10", "morse11", "morse12", "morse13"}:
             additions |= {"app/zones/backend/app/services/prequential.py", "app/zones/backend/app/db/migrations/015_prequential_quality.sql"}
+        if revision == "morse13":
+            additions |= QUEUE_ADDITIONS
         for rows in (manifest["files"], manifest["build_files"]):
             need([item["path"] for item in rows[-len(additions):]] == sorted(additions),
                  "MORSE_ADDITION_ORDER")
@@ -202,17 +209,26 @@ def verify_http(client, manifest, mode, assets=False):
     expected_settings = {"pubg_api_key_configured": False, "prediction_mode": mode}
     need(client.json("/api/zones/settings") == expected_settings, "FRESH_OR_PERSISTED_SETTINGS")
     status = client.json("/api/zones/collector/status")
-    expected_interval_minutes = 5 if manifest.get("runtime_revision") in {"morse10", "morse11", "morse12"} else 30
+    if manifest.get("runtime_revision") == "morse13":
+        # Fresh data has no Key and therefore cannot start provider work. Wait
+        # only for the local bootstrap before comparing two complete views.
+        for _ in range(30):
+            if status.get("running") is not True:
+                break
+            time.sleep(.1)
+            status = client.json("/api/zones/collector/status")
+        need(status.get("running") is False, "FRESH_QUEUE_BOOTSTRAP_IDLE")
+    expected_interval_minutes = 5 if manifest.get("runtime_revision") in {"morse10", "morse11", "morse12", "morse13"} else 30
     need(status.get("enabled") is True and status.get("api_key_configured") is False and
          status.get("interval_minutes") == expected_interval_minutes and status.get("batch_size") == 20 and
          status.get("total_matches") == 0 and status.get("total_circles") == 0 and status.get("models") == [] and
          status.get("last_run_at") is None and status.get("next_run_at") is None and
          status.get("last_error_code") is None, "FRESH_COLLECTOR_STATE")
-    if manifest.get("runtime_revision") in {"morse11", "morse12"}:
+    if manifest.get("runtime_revision") in {"morse11", "morse12", "morse13"}:
         need(status.get("batch_target_kind") == "inserted" and
              status.get("batch_deadline_seconds") == 300 and
              "last_batch" in status and status["last_batch"] is None, "FRESH_EFFECTIVE_BATCH_POLICY")
-    if manifest.get("runtime_revision") in {"morse7", "morse8", "morse9", "morse10", "morse11", "morse12"}:
+    if manifest.get("runtime_revision") in {"morse7", "morse8", "morse9", "morse10", "morse11", "morse12", "morse13"}:
         training = status.get("training_maps")
         maps = {"erangel", "miramar", "taego", "deston", "rondo", "vikendi", "sanhok", "karakin", "paramo"}
         need(isinstance(training, list) and len(training) == len(maps) and
@@ -224,7 +240,7 @@ def verify_http(client, manifest, mode, assets=False):
                  row.get("quality_state") == "pending" and row.get("trained_at") is None and
                  row.get("policy") == "native-heldout-containment-v1" for row in training),
              "FRESH_TRAINING_QUALITY_STATE")
-        if manifest.get("runtime_revision") in {"morse8", "morse9", "morse10", "morse11", "morse12"}:
+        if manifest.get("runtime_revision") in {"morse8", "morse9", "morse10", "morse11", "morse12", "morse13"}:
             need(all(set(row.get("modes", {})) == {"normal", "competitive"} and
                      all(value.get("policy") == "native-serving-mode-v2" and
                          value.get("model_run_id") is None and
@@ -232,7 +248,7 @@ def verify_http(client, manifest, mode, assets=False):
                          value.get("final", {}).get("confidence_percent") is None
                          for value in row["modes"].values()) for row in training),
                  "FRESH_MODE_QUALITY_STATE")
-        if manifest.get("runtime_revision") in {"morse9", "morse10", "morse11", "morse12"}:
+        if manifest.get("runtime_revision") in {"morse9", "morse10", "morse11", "morse12", "morse13"}:
             need(all(value.get("rolling", {}).get("policy") == "prequential-circle-iou-mean-v1" and
                      value["rolling"].get("window_size") == 20 and
                      value["rolling"].get("stage_score_rule") == "circle_intersection_over_union" and
@@ -246,7 +262,24 @@ def verify_http(client, manifest, mode, assets=False):
                          for kind in ("next", "final"))
                      for row in training for value in row["modes"].values()),
                  "FRESH_PROSPECTIVE_WINDOW")
-    if manifest.get("runtime_revision") == "morse12":
+    if manifest.get("runtime_revision") == "morse13":
+        queue, discovery = status.get("queue"), status.get("discovery")
+        need(status.get("collection_policy") == "daily-sample-queue-v1" and
+             status.get("phase") == "idle" and
+             isinstance(queue, dict) and all(type(queue.get(key)) is int for key in ("pending", "retrying")) and
+             queue == {"pending": 0, "retrying": 0, "next_retry_at": None} and
+             isinstance(discovery, dict) and type(discovery.get("interval_seconds")) is int and
+             isinstance(discovery.get("last_result"), dict) and
+             all(type(discovery["last_result"].get(key)) is int for key in ("received", "queued", "known")) and
+             isinstance(discovery.get("history"), dict) and
+             all(type(discovery["history"].get(key)) is int for key in ("total", "pending", "completed", "expired")) and
+             discovery == {"interval_seconds": 3600, "last_checked_at": None,
+                 "latest_checked_at": None, "next_latest_check_at": None,
+                 "last_changed_at": None, "next_check_at": None, "state": "pending",
+                 "last_result": {"received": 0, "queued": 0, "known": 0},
+                 "history": {"total": 13, "pending": 13, "completed": 0, "expired": 0}},
+             "FRESH_DAILY_SAMPLE_QUEUE_POLICY")
+    if manifest.get("runtime_revision") in {"morse12", "morse13"}:
         compact = client.json("/api/zones/collector/status?view=ui")
         expected = {key: value for key, value in status.items()
                     if key not in {"models", "supported_stages", "training_maps"}}
@@ -256,6 +289,12 @@ def verify_http(client, manifest, mode, assets=False):
             "modes": {kind: {key: value[key] for key in mode_fields} for kind, value in row["modes"].items()}}
             for row in status["training_maps"]]
         need(isinstance(compact, dict) and compact == expected, "COMPACT_STATUS_PROJECTION")
+        if manifest.get("runtime_revision") == "morse13":
+            try:
+                identical = json.dumps(compact, sort_keys=True, allow_nan=False) == json.dumps(expected, sort_keys=True, allow_nan=False)
+            except (TypeError, ValueError):
+                identical = False
+            need(identical, "COMPACT_QUEUE_TYPES")
     for map_id, radius in (("taego", 63379.70703125), ("erangel", 192059.71875)):
         value = client.json("/api/zones/predict", body={"map_id": map_id,
             "current_circle_center": {"x": 408000, "y": 408000}, "current_radius": radius})
@@ -263,7 +302,7 @@ def verify_http(client, manifest, mode, assets=False):
         extra_keys = {"quality_policy"} if revision == "accuracy1" else set()
         if revision == "accuracy1":
             need(value.get("quality_policy") == "chronological-relative-knn-v1", "PREDICTION_QUALITY_POLICY")
-        if revision in {"morse1", "morse3", "morse4", "morse6", "morse7", "morse8", "morse9", "morse10", "morse11", "morse12"}:
+        if revision in {"morse1", "morse3", "morse4", "morse6", "morse7", "morse8", "morse9", "morse10", "morse11", "morse12", "morse13"}:
             extra_keys = {"model_match_type", "prediction_policy", "parameter_policy", "upstream_commit"}
             need(value.get("model_match_type") == "mixed" and
                  value.get("prediction_policy") == "morse-original-d4a93564" and
@@ -271,12 +310,12 @@ def verify_http(client, manifest, mode, assets=False):
                  value.get("upstream_commit") == MORSE_COMMIT, "PREDICTION_NATIVE_POLICY")
         need(set(value) == extra_keys | {"map_id", "current_phase", "next_circle", "final_circle", "model_run_id", "warnings",
                             "engine", "match_type", "geometry_policy"}, "PREDICTION_SCHEMA")
-        engine = "morse_zone_predictor" if revision in {"morse1", "morse3", "morse4", "morse6", "morse7", "morse8", "morse9", "morse10", "morse11", "morse12"} else "pubg_circle_analyzer_knn"
-        geometry = "morse-original-v1" if revision in {"morse1", "morse3", "morse4", "morse6", "morse7", "morse8", "morse9", "morse10", "morse11", "morse12"} else "nested-circles-v2"
+        engine = "morse_zone_predictor" if revision in {"morse1", "morse3", "morse4", "morse6", "morse7", "morse8", "morse9", "morse10", "morse11", "morse12", "morse13"} else "pubg_circle_analyzer_knn"
+        geometry = "morse-original-v1" if revision in {"morse1", "morse3", "morse4", "morse6", "morse7", "morse8", "morse9", "morse10", "morse11", "morse12", "morse13"} else "nested-circles-v2"
         need(value["map_id"] == map_id and value["engine"] == engine and
              value["geometry_policy"] == geometry and value["match_type"] == mode and
              all(value[k] is None for k in ("current_phase", "next_circle", "final_circle", "model_run_id")), "FRESH_PREDICTION")
-        warning = ("phase_or_match_type_unresolved" if mode == "auto" and revision not in {"morse1", "morse3", "morse4", "morse6", "morse7", "morse8", "morse9", "morse10", "morse11", "morse12"}
+        warning = ("phase_or_match_type_unresolved" if mode == "auto" and revision not in {"morse1", "morse3", "morse4", "morse6", "morse7", "morse8", "morse9", "morse10", "morse11", "morse12", "morse13"}
                    else "phase_unresolved_from_observed_radii")
         need(value["warnings"] == [warning], "FRESH_PREDICTION_WARNING")
     records = []
@@ -363,7 +402,7 @@ with tempfile.TemporaryDirectory(prefix='gixradar-quality-', dir='/data') as dir
         assert ready['confidence_percent'] == 100
         assert sparse['effective_training_matches'] == 4 and sparse['validation_match_count'] == 0
         assert sparse['confidence_percent'] is None and sparse['quality_state'] == 'insufficient_validation'
-        if len(sys.argv)>1 and sys.argv[1] in ('morse8','morse9','morse10','morse11','morse12'):
+        if len(sys.argv)>1 and sys.argv[1] in ('morse8','morse9','morse10','morse11','morse12','morse13'):
             serving = ready['modes']['normal']
             assert serving['policy'] == 'native-serving-mode-v2'
             assert serving['model_run_id'] == ready['model_run_id']
@@ -546,10 +585,10 @@ def main(argv=None):
         need(network_state.get("Driver") == "bridge" and network_state.get("Internal") is False, "DEDICATED_BRIDGE_NETWORK")
         need(docker("exec", identifier, "node", "--version") == "v18.5.0", "NODE_VERSION")
         report["installed"] = json.loads(docker("exec", identifier, "python3", "-c", IMAGE_AUDIT, manifest_sha, args.expected_release))
-        if manifest.get("runtime_revision") in {"morse7", "morse8", "morse9", "morse10", "morse11", "morse12"}:
+        if manifest.get("runtime_revision") in {"morse7", "morse8", "morse9", "morse10", "morse11", "morse12", "morse13"}:
             report["trainingQuality"] = json.loads(docker("exec", identifier, "python3", "-c", QUALITY_AUDIT, manifest["runtime_revision"]))
             need(report["trainingQuality"].get("passed") is True, "TRAINING_QUALITY_AUDIT")
-        if manifest.get("runtime_revision") in {"morse9", "morse10", "morse11", "morse12"}:
+        if manifest.get("runtime_revision") in {"morse9", "morse10", "morse11", "morse12", "morse13"}:
             report["rollingQuality"] = json.loads(docker("exec", identifier, "python3", "-c", PREQUENTIAL_AUDIT))
             need(report["rollingQuality"].get("passed") is True, "PROSPECTIVE_QUALITY_AUDIT")
         report["image"] = {"requested": args.image, "id": image_id, "os": "linux", "architecture": "amd64",
