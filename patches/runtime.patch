@@ -501,6 +501,60 @@ new file mode 100644
 +    evaluated_at TEXT NOT NULL,
 +    PRIMARY KEY(model_run_id,match_type,policy)
 +);
+diff --git a/app/zones/backend/app/db/migrations/015_prequential_quality.sql b/app/zones/backend/app/db/migrations/015_prequential_quality.sql
+new file mode 100644
+--- /dev/null
++++ b/app/zones/backend/app/db/migrations/015_prequential_quality.sql
+@@ -0,0 +1,49 @@
++-- A new, prospective arrival-order epoch. Never backfill already known games.
++CREATE TABLE IF NOT EXISTS prequential_epoch (
++    id INTEGER PRIMARY KEY CHECK(id=1),
++    policy TEXT NOT NULL,
++    started_at TEXT NOT NULL
++);
++INSERT OR IGNORE INTO prequential_epoch(id,policy,started_at)
++VALUES(1,'prequential-circle-iou-v1',strftime('%Y-%m-%dT%H:%M:%fZ','now'));
++CREATE TABLE IF NOT EXISTS prequential_exclusions (
++    match_id TEXT PRIMARY KEY
++);
++INSERT OR IGNORE INTO prequential_exclusions(match_id) SELECT match_id FROM matches;
++
++CREATE TABLE IF NOT EXISTS prequential_matches (
++    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
++    policy TEXT NOT NULL,
++    match_id TEXT NOT NULL,
++    map_id TEXT NOT NULL,
++    match_type TEXT NOT NULL CHECK(match_type IN ('normal','competitive')),
++    epoch_started_at TEXT NOT NULL,
++    game_created_at TEXT,
++    score_acquired_at TEXT NOT NULL,
++    model_run_id TEXT,
++    model_artifact_sha256 TEXT,
++    next_case_count INTEGER NOT NULL CHECK(next_case_count>=0),
++    next_pass INTEGER CHECK(next_pass IN (0,1)),
++    final_case_count INTEGER NOT NULL CHECK(final_case_count>=0),
++    final_pass INTEGER CHECK(final_pass IN (0,1)),
++    payload_sha256 TEXT NOT NULL,
++    payload_json TEXT NOT NULL,
++    UNIQUE(policy,match_id),
++    CHECK((next_case_count=0 AND next_pass IS NULL) OR (next_case_count>0 AND next_pass IS NOT NULL)),
++    CHECK((final_case_count=0 AND final_pass IS NULL) OR (final_case_count>0 AND final_pass IS NOT NULL)),
++    CHECK((model_run_id IS NULL AND model_artifact_sha256 IS NULL)
++       OR (model_run_id IS NOT NULL AND model_artifact_sha256 IS NOT NULL))
++);
++CREATE INDEX IF NOT EXISTS idx_prequential_window ON prequential_matches(map_id,match_type,policy,sequence);
++CREATE TRIGGER IF NOT EXISTS prequential_matches_no_update BEFORE UPDATE ON prequential_matches
++BEGIN SELECT RAISE(ABORT,'PREQUENTIAL_LEDGER_IMMUTABLE'); END;
++CREATE TRIGGER IF NOT EXISTS prequential_matches_no_delete BEFORE DELETE ON prequential_matches
++BEGIN SELECT RAISE(ABORT,'PREQUENTIAL_LEDGER_IMMUTABLE'); END;
++
++-- Mutable orchestration state is separate from the immutable score receipt.
++CREATE TABLE IF NOT EXISTS prequential_training_pending (
++    map_id TEXT PRIMARY KEY,
++    ledger_sequence INTEGER NOT NULL REFERENCES prequential_matches(sequence),
++    match_id TEXT NOT NULL,
++    created_at TEXT NOT NULL
++);
 diff --git a/app/zones/backend/app/db/repository.py b/app/zones/backend/app/db/repository.py
 --- a/app/zones/backend/app/db/repository.py
 +++ /dev/null
@@ -3451,7 +3505,12 @@ diff --git a/app/zones/backend/app/services/analyzer.py b/app/zones/backend/app/
 diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app/services/collector.py
 --- a/app/zones/backend/app/services/collector.py
 +++ b/app/zones/backend/app/services/collector.py
-@@ -5,7 +5,7 @@
+@@ -1,11 +1,12 @@
+ """One cooperative worker: collect circles, commit, then train changed datasets."""
+ from __future__ import annotations
+ from datetime import datetime, UTC
++from uuid import uuid4
+ import hashlib
  import json
  import threading
  import time
@@ -3460,19 +3519,21 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
  from app.core.errors import AppError
  from app.core.timestamps import parsed_time, timestamp
  from app.db.connection import connect_database, database_connection
-@@ -13,9 +13,11 @@
+@@ -13,9 +14,13 @@
  from app.services.pubg_api import PubgApiClient, Cancelled, path_segment, telemetry_url_allowed
  from app.services.telemetry_parser import extract_circles, insert_circles
  from app.services.training import AnalyzerTrainer
 +from app.services.quality import latest_training_maps
++from app.services.prequential import score_match, pending_training, acknowledge_training
  from app.services.analyzer import ENGINE, ALGORITHM, canonical_mode, model_summaries
  
  INTERVAL_SECONDS = 1800
 +QUALITY_RETRY_DELAYS = (60, 300, 900)
++BACKFILL_PENDING_PREFIX = "prequential_backfill:"
  BATCH_SIZE = 20
  SCAN_LIMIT = 100
  RETRY_BATCH_SIZE = 5
-@@ -50,7 +52,7 @@
+@@ -50,7 +55,7 @@
      data=payload.get("data") if isinstance(payload,dict) else None
      if not isinstance(data,(dict,list)):
          raise AppError("PUBG_RESPONSE_INVALID","Official sample data is incomplete",502)
@@ -3481,7 +3542,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
      for item in data if isinstance(data,list) else [data]:
          if not isinstance(item,dict):
              continue
-@@ -60,6 +62,7 @@
+@@ -60,6 +65,7 @@
          if not isinstance(refs,list):
              continue
          valid=True
@@ -3489,7 +3550,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
          for ref in refs[:1000]:
              value=ref.get("id") if isinstance(ref,dict) else None
              try:
-@@ -70,7 +73,7 @@
+@@ -70,9 +76,15 @@
                  seen.add(value);result.append(value)
              if len(result)>=1000:
                  return result
@@ -3497,8 +3558,16 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
 +    if not valid or nonempty_refs and not result:
          raise AppError("PUBG_RESPONSE_INVALID","Official sample data is incomplete",502)
      return result
++
++class _TrainingBlocked(Exception):
++    """Committed observations are retained; stop scoring new games until fit."""
++    def __init__(self, error):
++        self.code=(error.code if isinstance(error,AppError) and error.code in ERROR_CODES
++                   else "COLLECTOR_INTERNAL_ERROR")
  
-@@ -83,7 +86,10 @@
+ class CircleCollector:
+     def __init__(self, settings: Settings, *, client_factory=None, clock=time.time):
+@@ -83,7 +95,10 @@
          self.running=False;self.next_run_at=None;self.last_run_at=None
          self.last_result=empty_result();self.last_error_code=None;self.failures=0
          self._scheduled_at=None;self._key_generation=0
@@ -3509,7 +3578,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
          with database_connection(settings.database_path) as connection:
              self._seed_legacy(connection)
              self._seed_retry_legacy(connection)
-@@ -113,6 +119,9 @@
+@@ -113,6 +128,9 @@
                  return  # Old two-field summaries remain readable.
              if value.get("last_run_at") is not None and (stamp is None or stamp>self.clock()+60):
                  return
@@ -3519,7 +3588,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
              error=value.get("last_error_code");failures=value.get("failures");due=value.get("next_run_at")
              if error is not None and (not isinstance(error,str) or error not in ERROR_CODES):
                  return
-@@ -132,6 +141,8 @@
+@@ -132,6 +150,8 @@
          with self.guard:
              value={"version":2,"last_run_at":self.last_run_at,"last_result":self.last_result,
                     "last_error_code":self.last_error_code,"failures":self.failures,"next_run_at":self._scheduled_at}
@@ -3528,7 +3597,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
              try:
                  with database_connection(self.settings.database_path) as connection:
                      connection.execute("INSERT OR REPLACE INTO collector_state(key,value) VALUES('summary',?)",
-@@ -169,6 +180,7 @@
+@@ -169,6 +189,7 @@
              if marker==self._key_marker:
                  return False
              self._key_marker=marker;self._key_generation+=1
@@ -3536,11 +3605,12 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
              client=self.client
              self.next_run_at=self.clock() if self.settings.pubg_api_key else None
              self._scheduled_at=self.next_run_at
-@@ -185,7 +197,11 @@
+@@ -185,7 +206,12 @@
              self.running = True
          try:
              with database_connection(self.settings.database_path) as connection:
 -                AnalyzerTrainer(connection, self.config, self.settings.model_dir, self.stop_event).sync_all()
++                self._drain_training(connection,self._check_local_cancelled)
 +                trainer=AnalyzerTrainer(connection, self.config, self.settings.model_dir, self.stop_event)
 +                try:
 +                    trainer.sync_all()
@@ -3549,7 +3619,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
          except Cancelled:
              pass
          except Exception:
-@@ -197,13 +213,23 @@
+@@ -197,13 +223,23 @@
          while not self.stop_event.is_set():
              with self.guard:
                  due=self.next_run_at
@@ -3575,7 +3645,54 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
                  continue
              try:
                  self.run_once()
-@@ -299,9 +325,9 @@
+@@ -242,13 +278,16 @@
+                         (s.state='failed' AND s.retry_after<=?))
+                     ORDER BY COALESCE(s.retry_after,r.first_seen_at),r.match_id LIMIT ?""",
+                     (self.clock(),self.clock(),RETRY_BATCH_SIZE)).fetchall()
+-                processed=set();new_candidates=0;halt=False
++                processed=set();new_candidates=0;halt=False;training_blocked=False
+                 names={name:config for config in self.config.list_maps() for name in config["telemetry_names"]}
+                 for row in due:
+                     match_id=row["match_id"]
+                     self._check_cancelled(client)
+                     stats["checked"]+=1;new_candidates+=1;processed.add(match_id)
+-                    current=self._process_match(connection,client,match_id,names,stats)
++                    try:
++                        current=self._process_match(connection,client,match_id,names,stats)
++                    except _TrainingBlocked as blocked:
++                        error=preferred_error(error,blocked.code);training_blocked=True;break
+                     error=preferred_error(error,current)
+                     if current in ("PUBG_RATE_LIMITED","PUBG_AUTH_REJECTED"):
+                         halt=True;break
+@@ -265,6 +304,8 @@
+                 except ValueError:
+                     offset=0
+                 window=(refs[offset:]+refs[:offset])[:max(0,SCAN_LIMIT-stats["checked"])]
++                if training_blocked:
++                    window=[]
+                 consumed=0
+                 for match_id in window:
+                     self._check_cancelled(client)
+@@ -285,23 +326,26 @@
+                         continue
+                     new_candidates+=1
+                     processed.add(match_id)
+-                    current=self._process_match(connection,client,match_id,names,stats)
++                    try:
++                        current=self._process_match(connection,client,match_id,names,stats)
++                    except _TrainingBlocked as blocked:
++                        error=preferred_error(error,blocked.code);training_blocked=True;break
+                     error=preferred_error(error,current)
+                     if current in ("PUBG_RATE_LIMITED","PUBG_AUTH_REJECTED"):
+                         break
+                 if refs:
+                     connection.execute("INSERT OR REPLACE INTO collector_state(key,value) VALUES('cursor',?)",(str(offset+consumed),))
+                 connection.commit()
+-                if not batch_cancel.is_set() and not self.stop_event.is_set():
++                if not training_blocked and not batch_cancel.is_set() and not self.stop_event.is_set():
+                     self._train_changed(connection,batch_cancel)
+             finally:
+                 connection.close()
          except Cancelled:
              cancelled=True
          except AppError as exc:
@@ -3587,7 +3704,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
          finally:
              if started:
                  with self.guard:
-@@ -371,6 +397,7 @@
+@@ -371,6 +415,7 @@
              if not isinstance(events,list):
                  raise AppError("PUBG_RESPONSE_INVALID","Official telemetry data is incomplete",502)
              circles=extract_circles(events,config["world_size"])
@@ -3595,24 +3712,132 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
              ended=not circles and any(isinstance(event,dict) and event.get("_T")=="LogMatchEnd" for event in events)
              del events,metadata,url
              if not circles:
-@@ -381,6 +408,7 @@
+@@ -378,11 +423,52 @@
+                     raise AppError("PUBG_RESPONSE_INVALID","Official circle data is incomplete",502)
+                 self._seen(connection,match_id,"excluded",code="NO_VALID_CIRCLES")
+                 connection.commit();stats["skipped"]+=1;return None
++            check=lambda:self._check_cancelled(client)
++            try:
++                # Return holding BEGIN IMMEDIATE only when this map has no
++                # unfinished earlier observation. Other processes use the same
++                # durable gate and compare-sequence acknowledgement.
++                self._drain_training(connection,check,map_id=config["map_id"],hold_ready=True)
++            except Cancelled:
++                raise
++            except Exception as error:
++                raise _TrainingBlocked(error) from None
++            # HTTP and parsing happen outside the writer lock. Recheck here so
++            # concurrent collectors never re-score an ID already admitted.
++            if connection.execute("SELECT 1 FROM collector_seen WHERE match_id=? AND state IN ('completed','excluded')",(match_id,)).fetchone():
++                connection.rollback();stats["skipped"]+=1;return None
++            existing=connection.execute("SELECT 1 FROM matches WHERE match_id=?",(match_id,)).fetchone()
++            if existing:
++                # Historical partial/failed imports still recover their data,
++                # but can never become a fresh prospective accuracy sample.
++                connection.execute("INSERT OR IGNORE INTO prequential_exclusions(match_id) VALUES(?)",(match_id,))
++                connection.execute("INSERT OR REPLACE INTO collector_state(key,value) VALUES(?,?)",
++                    (BACKFILL_PENDING_PREFIX+config["map_id"],uuid4().hex))
++            else:
++                evaluation=score_match(connection,self.config,self.settings.model_dir,match_id,
++                    config["map_id"],canonical_mode(attributes["matchType"]),circles,check,
++                    game_created_at=attributes.get("createdAt"),acquired_at=iso(self.clock()))
++                if evaluation["status"]!="scored":
++                    # An immutable receipt/epoch exclusion survives deletion of
++                    # outside data. Make the non-new identity durably terminal.
++                    self._seen(connection,match_id,"excluded",code="PREQUENTIAL_EPOCH_EXCLUDED")
++                    check();connection.commit();stats["skipped"]+=1;return None
              self._match(connection,match_id,attributes)
              inserted=insert_circles(connection,match_id,circles)
              self._seen(connection,match_id,"completed")
 +            self._check_cancelled(client)
              connection.commit();stats["inserted"]+=1;stats["circle_rows"]+=inserted
++            try:
++                # Fit after this observation's immutable prediction ledger and
++                # circles commit, before this batch scores its next new game.
++                self._drain_training(connection,check,map_id=config["map_id"])
++            except Cancelled:
++                raise
++            except Exception as error:
++                raise _TrainingBlocked(error) from None
              return None
++        except _TrainingBlocked:
++            connection.rollback();raise
          except Cancelled:
-@@ -462,18 +490,77 @@
+             connection.rollback();raise
+         except AppError as exc:
+@@ -462,18 +548,140 @@
      def _train_changed(self, connection, cancel):
          if cancel.is_set() or self.stop_event.is_set():
              raise Cancelled()
 -        AnalyzerTrainer(connection, self.config, self.settings.model_dir, cancel).sync_all()
-+        trainer=AnalyzerTrainer(connection, self.config, self.settings.model_dir, cancel)
++        def check():
++            if cancel.is_set() or self.stop_event.is_set():
++                raise Cancelled()
++        self._drain_training(connection,check)
++        trainer=AnalyzerTrainer(connection, self.config, self.settings.model_dir, cancel,cancel_check=check)
 +        try:
 +            trainer.sync_all()
 +        finally:
 +            self._record_quality_result(trainer)
++
++    def _check_local_cancelled(self):
++        if self.stop_event.is_set():
++            raise Cancelled()
++
++    def _drain_training(self, connection, check, *, map_id=None, hold_ready=False):
++        """Train durable pending inputs without ever re-scoring their games.
++
++        The ledger/observation commit and native model commit are deliberately
++        separate. A persisted per-map gate spans that gap, including process
++        exits. Every scoring writer rechecks under BEGIN IMMEDIATE. A stale
++        trainer acknowledges only its exact ledger sequence, never a later one.
++        """
++        while True:
++            check()
++            if connection.in_transaction:
++                raise AppError("ANALYZER_DATA_INVALID","Training gate requires its own transaction",503)
++            connection.execute("BEGIN IMMEDIATE")
++            try:
++                pending=pending_training(connection,map_id)
++                if not pending:
++                    backfills=connection.execute("SELECT key,value FROM collector_state WHERE substr(key,1,?)=? ORDER BY key",
++                        (len(BACKFILL_PENDING_PREFIX),BACKFILL_PENDING_PREFIX)).fetchall()
++                    for backfill in backfills:
++                        selected=backfill["key"][len(BACKFILL_PENDING_PREFIX):]
++                        if map_id is not None and selected!=map_id:
++                            continue
++                        token=backfill["value"]
++                        if not isinstance(token,str) or len(token)!=32 or any(c not in "0123456789abcdef" for c in token):
++                            raise AppError("ANALYZER_DATA_INVALID","Historical training gate is invalid",503)
++                        pending=[{"map_id":selected,"backfill_key":backfill["key"],"backfill_token":token}]
++                        break
++                check()
++                if not pending:
++                    if not hold_ready:
++                        connection.rollback()
++                    return
++                row=pending[0]
++            except BaseException:
++                connection.rollback();raise
++            connection.rollback()
++            trainer=AnalyzerTrainer(connection,self.config,self.settings.model_dir,self.stop_event,
++                                    cancel_check=check)
++            try:
++                trainer.sync(row["map_id"])
++            finally:
++                self._record_quality_result(trainer)
++            check()
++            connection.execute("BEGIN IMMEDIATE")
++            try:
++                if "backfill_key" in row:
++                    connection.execute("DELETE FROM collector_state WHERE key=? AND value=?",
++                                       (row["backfill_key"],row["backfill_token"]))
++                else:
++                    acknowledge_training(connection,row["map_id"],row["ledger_sequence"])
++                check()
++                connection.commit()
++            except BaseException:
++                connection.rollback();raise
 +
 +    def _record_quality_result(self, trainer, *, retry=False, failed=()):
 +        attempted=getattr(trainer,"quality_attempted_runs",())
@@ -3998,6 +4223,313 @@ diff --git a/app/zones/backend/app/services/prediction.py b/app/zones/backend/ap
 +            item["observation_matches"] = sum(data.get(phase, {}).get("sample_count", 0)
 +                                              for data in profiles.values())
 +        return result
+diff --git a/app/zones/backend/app/services/prequential.py b/app/zones/backend/app/services/prequential.py
+new file mode 100644
+--- /dev/null
++++ b/app/zones/backend/app/services/prequential.py
+@@ -0,0 +1,302 @@
++"""Prospective test-before-train circle IoU receipts and rolling match verdicts.
++
++This module never commits, fits, changes original ranking/math, or contacts an
++external service. The collector owns one reserved writer transaction around
++score_match and ingestion, then trains and acknowledges the separate map gate.
++"""
++from __future__ import annotations
++
++from copy import deepcopy
++from datetime import datetime, timezone
++from math import acos, hypot, isfinite, pi, sqrt
++from pathlib import Path
++from uuid import uuid4
++import json
++import re
++import sqlite3
++import sys
++
++from app.core.errors import AppError
++from app.morse_native.prediction import LLMSettings
++from app.services.analyzer import (VerifiedPredictionService,artifact_reference,
++    fingerprint,native_config)
++from app.services.prediction import PredictionService
++
++POLICY = 'prequential-circle-iou-v1'
++WINDOW_SIZE = 20
++IOU_THRESHOLD = 0.70
++_MODES = ('normal','competitive')
++_HORIZONS = ('next','final')
++
++
++def _check(check):
++    if check is not None:
++        check()
++
++
++def _finite(value):
++    return type(value) in (int,float) and isfinite(value)
++
++
++def circle_iou(x1,y1,r1,x2,y2,r2):
++    """Intersection/union of two positive-area circles; unrounded float result."""
++    if not all(_finite(value) for value in (x1,y1,r1,x2,y2,r2)) or r1<=0 or r2<=0:
++        raise ValueError('Finite centers and positive radii are required')
++    distance = hypot(x1-x2,y1-y2)
++    if distance>=r1+r2:
++        return 0.0
++    if distance<=abs(r1-r2):
++        return (min(r1,r2)/max(r1,r2))**2
++    scale = max(distance,r1,r2)
++    d,a,b = distance/scale,r1/scale,r2/scale
++    first = max(-1.0,min(1.0,(d*d+a*a-b*b)/(2*d*a)))
++    second = max(-1.0,min(1.0,(d*d+b*b-a*a)/(2*d*b)))
++    product = max(0.0,(-d+a+b)*(d+a-b)*(d-a+b)*(d+a+b))
++    intersection = a*a*acos(first)+b*b*acos(second)-.5*sqrt(product)
++    union = pi*(a*a+b*b)-intersection
++    return max(0.0,min(1.0,intersection/union))
++
++
++def iou_success(value):
++    """Strict user rule: exact 0.70 fails. No rounding or tolerance relaxation."""
++    return _finite(value) and value>IOU_THRESHOLD
++
++
++def _timestamp(value,required=False):
++    if value is None and not required:
++        return None
++    try:
++        parsed = datetime.fromisoformat(value.replace('Z','+00:00')) if isinstance(value,str) else None
++        if parsed is None or parsed.tzinfo is None:
++            raise ValueError()
++        return parsed.astimezone(timezone.utc).isoformat()
++    except (ValueError,OverflowError):
++        if required:
++            raise AppError('PREQUENTIAL_TIME_INVALID','Scoring time must be an aware timestamp',503)
++        return None
++
++
++def _transaction(connection):
++    if not connection.in_transaction:
++        raise ValueError('Prequential writes require a caller-owned transaction')
++
++
++def pending_training(connection,map_id=None):
++    query = 'SELECT map_id,ledger_sequence,match_id,created_at FROM main.prequential_training_pending'
++    rows = connection.execute(query+(' WHERE map_id=?' if map_id is not None else '')+' ORDER BY ledger_sequence',
++                              (map_id,) if map_id is not None else ()).fetchall()
++    return [dict(row) for row in rows]
++
++
++def acknowledge_training(connection,map_id,ledger_sequence):
++    """Clear only the exact completed training attempt; caller commits."""
++    _transaction(connection)
++    return connection.execute('DELETE FROM main.prequential_training_pending WHERE map_id=? AND ledger_sequence=?',
++                              (map_id,ledger_sequence)).rowcount==1
++
++
++def _circle(value,size):
++    if not isinstance(value,dict):
++        return None
++    center = value.get('center')
++    x,y = (center.get('x'),center.get('y')) if isinstance(center,dict) else (value.get('center_x'),value.get('center_y'))
++    radius = value.get('radius')
++    if not all(_finite(item) for item in (x,y,radius)) or not 0<=x<=size or not 0<=y<=size or not 0<radius<=size*2:
++        return None
++    return {'center_x':float(x),'center_y':float(y),'radius':float(radius)}
++
++
++def _truth(circles,size):
++    if not isinstance(circles,(list,tuple)):
++        raise AppError('PREQUENTIAL_CIRCLES_INVALID','Circle rows must be a sequence',503)
++    result,seen = {},set()
++    for value in circles:
++        if not isinstance(value,dict) or type(value.get('phase')) is not int or not 1<=value['phase']<=8:
++            raise AppError('PREQUENTIAL_CIRCLES_INVALID','Circle phase is invalid',503)
++        phase = value['phase']
++        if phase in seen:
++            raise AppError('PREQUENTIAL_CIRCLES_INVALID','Duplicate circle phase',503)
++        seen.add(phase)
++        circle = _circle(value,size)
++        if circle is not None:
++            result[phase] = circle
++    return result
++
++
++def _summary(row,status):
++    return {'status':status,'ledger_sequence':row['sequence'],'match_id':row['match_id'],
++        'map_id':row['map_id'],'match_type':row['match_type'],
++        'next_case_count':row['next_case_count'],'next_success':bool(row['next_pass']) if row['next_pass'] is not None else None,
++        'final_case_count':row['final_case_count'],'final_success':bool(row['final_pass']) if row['final_pass'] is not None else None}
++
++
++def _model_snapshot(connection,model_dir,map_id):
++    service = VerifiedPredictionService(connection,native_config(),Path(model_dir)/'morse',
++        LLMSettings(enabled=False,base_url=None,api_key=None,model=None,timeout_seconds=1))
++    loaded = service._load_latest_model(map_id,[])
++    if loaded is None:
++        return {'model_run_id':None,'artifact_sha256':None}
++    reference = artifact_reference(connection,model_dir,loaded.run_id)
++    if reference is None:
++        raise AppError('PREQUENTIAL_MODEL_CHANGED','Prediction model changed during snapshot',503)
++    return {'model_run_id':loaded.run_id,'artifact_sha256':reference[0]['artifact_sha256']}
++
++
++def _predict_all(connection,config,model_dir,map_id,mode,truth,check):
++    """No new-match row is in the source DB; only known current circles enter predict."""
++    service = PredictionService(connection,config,model_dir,prediction_mode=mode)
++    frozen_profiles = deepcopy(service._profiles(map_id,mode))
++    # Freeze the parameters produced by the real service from the old DB once,
++    # rather than reconstructing its stage/calibration/fallback implementation.
++    def profiles(requested_map,requested_mode):
++        if requested_map!=map_id or requested_mode!=mode:
++            raise AppError('PREQUENTIAL_SCOPE_INVALID','Prediction scope changed',503)
++        return deepcopy(frozen_profiles)
++    service._profiles = profiles
++    selected = _model_snapshot(connection,model_dir,map_id)
++    had_view = connection.execute("SELECT 1 FROM temp.sqlite_master WHERE type='view' AND name='model_runs'").fetchone() is not None
++    predictions = {}
++    try:
++        for phase,current in sorted(truth.items()):
++            if phase>=8 or phase+1 not in truth and 8 not in truth:
++                continue
++            _check(check)
++            request = {'map_id':map_id,'match_type':mode,
++                'current_circle_center':{'x':current['center_x'],'y':current['center_y']},
++                'current_radius':current['radius']}
++            response = service.predict(request)
++            if response.get('model_run_id') is not None and response['model_run_id']!=selected['model_run_id']:
++                raise AppError('PREQUENTIAL_MODEL_CHANGED','Serving identity changed during scoring',503)
++            predictions[phase] = {'request':request,'response':response}
++        if _model_snapshot(connection,model_dir,map_id)!=selected:
++            raise AppError('PREQUENTIAL_MODEL_CHANGED','Prediction artifact changed during scoring',503)
++    finally:
++        if not had_view:
++            active_error = sys.exc_info()[0] is not None
++            try:
++                connection.execute('DROP VIEW IF EXISTS temp.model_runs')
++            except sqlite3.Error:
++                if not active_error:
++                    raise
++    native = native_config()
++    frozen = {'model':selected,'mode_profiles':frozen_profiles,
++        'native_configuration_fingerprint':fingerprint({'map':native.get_map(map_id),'zones':native.get_zone_phases(map_id)})}
++    return frozen,predictions
++
++
++def _score_cases(map_id,size,truth,predictions):
++    result = {name:[] for name in _HORIZONS}
++    for phase,current in sorted(truth.items()):
++        if phase>=8:
++            continue
++        response = predictions.get(phase,{}).get('response',{})
++        for name,target_phase in (('next',phase+1),('final',8)):
++            if target_phase not in truth:
++                continue
++            target = truth[target_phase]
++            raw = response.get(name+'_circle')
++            predicted = _circle(raw,size)
++            actual_phase = raw.get('phase') if isinstance(raw,dict) else None
++            value = None
++            if predicted is not None:
++                value = circle_iou(predicted['center_x'],predicted['center_y'],predicted['radius'],
++                                   target['center_x'],target['center_y'],target['radius'])
++            passed = predicted is not None and actual_phase==target_phase and iou_success(value)
++            warnings = response.get('warnings',[])
++            safe_warnings = [value for value in warnings if isinstance(value,str) and re.fullmatch(r'[A-Za-z0-9_:.-]{1,128}',value)]
++            parameters = response.get('circle_parameters')
++            result[name].append({'current_phase':phase,'target_phase':target_phase,'current_circle':current,
++                'actual_circle':target,'predicted_circle':predicted,'predicted_phase':actual_phase if type(actual_phase) is int else None,
++                'iou':value,'success':bool(passed),'missing_prediction':predicted is None,
++                'parameters':{key:parameters[key] for key in ('current_radius','next_radius','final_radius')
++                    if isinstance(parameters,dict) and key in parameters and _finite(parameters[key])},
++                'warnings':safe_warnings})
++    return result
++
++
++def score_match(connection,config,model_dir,match_id,map_id,mode,circles,cancel_check=None,*,game_created_at=None,acquired_at=None):
++    """Write one immutable prospective receipt before ingestion, inside caller TX.
++
++    The caller must use BEGIN IMMEDIATE, then call this before inserting the
++    match or its circles, ingest them in the same transaction and commit. A
++    pending map gate must be trained/acknowledged before another new score.
++    """
++    _transaction(connection)
++    if not isinstance(match_id,str) or re.fullmatch(r'[A-Za-z0-9_.:-]{1,128}',match_id) is None or mode not in _MODES:
++        raise AppError('PREQUENTIAL_SCOPE_INVALID','Match identity or canonical mode is invalid',503)
++    entry = config.get_map(map_id)
++    map_id,size = entry['map_id'],entry['world_size']
++    _check(cancel_check)
++    duplicate = connection.execute('SELECT * FROM main.prequential_matches WHERE policy=? AND match_id=?',
++                                   (POLICY,match_id)).fetchone()
++    if duplicate is not None:
++        return _summary(duplicate,'already_scored')
++    existing = connection.execute('SELECT 1 FROM main.matches WHERE match_id=?',(match_id,)).fetchone() is not None
++    excluded = connection.execute('SELECT 1 FROM main.prequential_exclusions WHERE match_id=?',(match_id,)).fetchone() is not None
++    if existing or excluded:
++        return {'status':'skipped_existing','reason':'existing_match' if existing else 'epoch_excluded',
++            'ledger_sequence':None,'match_id':match_id,'map_id':map_id,'match_type':mode}
++    if pending_training(connection,map_id):
++        raise AppError('PREQUENTIAL_TRAINING_PENDING','The previous new match requires training first',503)
++    epoch = connection.execute('SELECT policy,started_at FROM main.prequential_epoch WHERE id=1').fetchone()
++    if epoch is None or epoch['policy']!=POLICY:
++        raise AppError('PREQUENTIAL_EPOCH_INVALID','The prospective evaluation epoch is unavailable',503)
++    marker = 'prequential_'+uuid4().hex
++    connection.execute('SAVEPOINT '+marker)
++    try:
++        at = _timestamp(acquired_at or datetime.now(timezone.utc).isoformat(),required=True)
++        truth = _truth(circles,size)
++        frozen,predictions = _predict_all(connection,config,model_dir,map_id,mode,truth,cancel_check)
++        cases = _score_cases(map_id,size,truth,predictions)
++        verdicts = {name:all(value['success'] for value in cases[name]) if cases[name] else None for name in _HORIZONS}
++        payload = {'policy':POLICY,'match_id':match_id,'map_id':map_id,'match_type':mode,
++            'game_created_at':_timestamp(game_created_at),'score_acquired_at':at,'epoch_started_at':epoch['started_at'],
++            'iou_threshold':IOU_THRESHOLD,'threshold_comparison':'strict_gt','match_success_rule':'all_evaluable_stages',
++            'frozen_pre_ingest':frozen,'cases':cases,'verdicts':verdicts}
++        _check(cancel_check)
++        selected = frozen['model']
++        cursor = connection.execute('INSERT INTO main.prequential_matches(policy,match_id,map_id,match_type,epoch_started_at,'+
++            'game_created_at,score_acquired_at,model_run_id,model_artifact_sha256,next_case_count,next_pass,final_case_count,'+
++            'final_pass,payload_sha256,payload_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
++            (POLICY,match_id,map_id,mode,epoch['started_at'],payload['game_created_at'],at,selected['model_run_id'],
++             selected['artifact_sha256'],len(cases['next']),int(verdicts['next']) if verdicts['next'] is not None else None,
++             len(cases['final']),int(verdicts['final']) if verdicts['final'] is not None else None,
++             fingerprint(payload),json.dumps(payload,sort_keys=True,separators=(',',':'),allow_nan=False)))
++        sequence = cursor.lastrowid
++        connection.execute('INSERT INTO main.prequential_training_pending(map_id,ledger_sequence,match_id,created_at) VALUES(?,?,?,?)',
++                           (map_id,sequence,match_id,at))
++        _check(cancel_check)
++        connection.execute('RELEASE SAVEPOINT '+marker)
++        row = connection.execute('SELECT * FROM main.prequential_matches WHERE sequence=?',(sequence,)).fetchone()
++        return _summary(row,'scored')
++    except BaseException:
++        try:
++            connection.execute('ROLLBACK TO SAVEPOINT '+marker)
++            connection.execute('RELEASE SAVEPOINT '+marker)
++        except sqlite3.Error:
++            pass
++        raise
++
++
++def rolling_quality(connection,map_id,mode):
++    """Read per-horizon last 20 committed match verdicts, across model runs."""
++    result = {'policy':POLICY,'map_id':map_id,'match_type':mode,'window_size':WINDOW_SIZE,
++        'iou_threshold':IOU_THRESHOLD,'threshold_comparison':'strict_gt','match_success_rule':'all_evaluable_stages',
++        'order_policy':'persisted_arrival_sequence','history_scope':'new_matches_since_epoch','epoch_started_at':None}
++    for name in _HORIZONS:
++        result[name] = {'quality_state':'waiting_new_matches','evaluated_matches':0,'successful_matches':0,'confidence_percent':None}
++    try:
++        epoch = connection.execute('SELECT policy,started_at FROM main.prequential_epoch WHERE id=1').fetchone()
++        if epoch is None or epoch['policy']!=POLICY or mode not in _MODES:
++            return result
++        result['epoch_started_at'] = epoch['started_at']
++        for name in _HORIZONS:
++            rows = connection.execute('SELECT '+name+'_pass AS success FROM main.prequential_matches '+
++                'WHERE policy=? AND map_id=? AND match_type=? AND '+name+'_case_count>0 ORDER BY sequence DESC LIMIT ?',
++                (POLICY,map_id,mode,WINDOW_SIZE)).fetchall()
++            count,success = len(rows),sum(value['success'] for value in rows)
++            result[name] = {'quality_state':'full_window' if count==WINDOW_SIZE else 'partial_window' if count else 'waiting_new_matches',
++                'evaluated_matches':count,'successful_matches':success,'confidence_percent':100.0*success/count if count else None}
++    except sqlite3.Error:
++        pass
++    return result
 diff --git a/app/zones/backend/app/services/pubg_api.py b/app/zones/backend/app/services/pubg_api.py
 --- a/app/zones/backend/app/services/pubg_api.py
 +++ b/app/zones/backend/app/services/pubg_api.py
@@ -4014,7 +4546,7 @@ diff --git a/app/zones/backend/app/services/quality.py b/app/zones/backend/app/s
 new file mode 100644
 --- /dev/null
 +++ b/app/zones/backend/app/services/quality.py
-@@ -0,0 +1,677 @@
+@@ -0,0 +1,680 @@
 +"""Optional historical coverage of the latest original training artifact.
 +
 +This is pooled held-out case coverage, not a future-circle probability. Native
@@ -4311,6 +4843,9 @@ new file mode 100644
 +        pass
 +    for entry in native.list_maps():
 +        result[entry['map_id']]['modes'] = _read_serving_modes(connection,model_dir,entry['map_id'])
++        from app.services.prequential import rolling_quality
++        for mode,value in result[entry['map_id']]['modes'].items():
++            value['rolling'] = rolling_quality(connection,entry['map_id'],mode)
 +    return [result[entry['map_id']] for entry in native.list_maps()]
 +
 +
@@ -4762,7 +5297,7 @@ diff --git a/app/zones/backend/app/services/telemetry_parser.py b/app/zones/back
 diff --git a/app/zones/backend/app/services/training.py b/app/zones/backend/app/services/training.py
 --- a/app/zones/backend/app/services/training.py
 +++ b/app/zones/backend/app/services/training.py
-@@ -1,261 +1,327 @@
+@@ -1,261 +1,330 @@
 -"""Bounded SQLite-to-JSON training matrices for the new Circle Analyzer engine."""
 +"""Run the pinned Morse trainer, with atomic application-owned persistence."""
  from __future__ import annotations
@@ -5045,19 +5580,21 @@ diff --git a/app/zones/backend/app/services/training.py b/app/zones/backend/app/
  
  
  class AnalyzerTrainer:
-     def __init__(self, connection, config, model_dir, stop_event=None):
+-    def __init__(self, connection, config, model_dir, stop_event=None):
++    def __init__(self, connection, config, model_dir, stop_event=None, *, cancel_check=None):
          self.connection, self.config = connection, config
 -        self.model_dir = Path(model_dir)
 +        self.model_dir = Path(model_dir).resolve()
          self.cancel = stop_event if stop_event is not None else Event()
 +        self.native_config = native_config()
++        self.cancel_check = cancel_check
 +        self.quality_attempted_runs = set()
 +        self.quality_pending_runs = set()
  
      def check(self):
          if self.cancel.is_set():
              raise Cancelled()
- 
+-
 -    def sync(self, map_id, mode):
 -        self.check()
 -        data = build_dataset(self.connection, self.config, map_id, mode)
@@ -5082,6 +5619,9 @@ diff --git a/app/zones/backend/app/services/training.py b/app/zones/backend/app/
 -        path = folder / (data["id"] + ".json")
 -        temporary = None
 -        renamed = False
++        if self.cancel_check is not None:
++            self.cancel_check()
++
 +    def _try_quality(self, run_id):
 +        """Isolate optional display metrics from the native training outcome.
 +
@@ -5329,15 +5869,15 @@ diff --git a/app/zones/web/index.html b/app/zones/web/index.html
 -<section><h2>可用 KNN 样本</h2><ul id="models"></ul><p class="notice">圈预测默认开启，按地图和对局模式使用 Circle Analyzer / KNN。各阶段至少需要 5 场独立比赛；样本不足时仅按可用校准估计，无法判断时暂不显示。圈样本数与独立比赛数分开统计，不代表预测准确率；实际圈型以游戏为准。</p></section>
 -</main></body></html>
 +<!doctype html>
-+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=df467b6a7ef2"><script defer src="/zones/settings.js?v=1fa3912b63b8"></script></head>
++<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=c8fcfbdd62e7"><script defer src="/zones/settings.js?v=e7dd89e4f92c"></script></head>
 +<body><main>
 +<p id="connection" class="muted" role="status">正在读取圈型预测状态…</p>
 +<button id="retry-connection" type="button" hidden>重新连接</button>
 +<a id="radar-login" href="/" target="_blank" rel="noopener" hidden>打开雷达登录（新标签页）</a>
 +<section><h1>Morse 圈型预测</h1><label for="prediction-mode">阶段识别模式</label><select id="prediction-mode" disabled><option value="auto">自动</option><option value="normal">普通匹配</option><option value="competitive">竞技排位</option></select><p id="mode-message" role="status"></p><p class="muted">模式用于识别当前圈阶段；原版统计模型按地图训练，普通与竞技共用。不能确认阶段时暂不叠加。</p></section>
 +<section><h2>官方 API Key</h2><p id="configured" class="muted">正在读取…</p><form id="key-form" hidden><label for="api-key">新的 PUBG API Key</label><input id="api-key" type="password" autocomplete="new-password" placeholder="仅在需要配置或更换时填写" maxlength="4096" required><button id="save-key" type="submit">保存 API Key</button><p id="message" role="status"></p></form><p class="muted">保存后自动更新圈样本；密钥不会回显。</p></section>
-+<section><h2>自动采集与样本更新</h2><dl><dt>当前状态</dt><dd id="collector-state">—</dd><dt>验证指标</dt><dd id="quality-state">—</dd><dt>采集计划</dt><dd id="interval">—</dd><dt>上次任务</dt><dd id="last-run">—</dd><dt>下次检查</dt><dd id="next-run">—</dd><dt>已收集比赛</dt><dd id="matches">—</dd><dt>圈型记录</dt><dd id="circles">—</dd></dl><p id="last-result" class="muted"></p><p id="task-error" class="error" role="status"></p><p id="quality-error" class="error" role="status"></p><p class="muted">状态更新于 <span id="updated">—</span></p></section>
-+<section><h2>地图模型与历史验证</h2><p class="muted">按实际预测使用的共享模型，分别查看普通匹配与竞技排位。</p><ul id="models"></ul><details class="training-explanation"><summary>如何理解历史验证命中率</summary><p class="muted">最新训练反映样本更新；历史验证按实际预测使用的模型统计，两者可能不同。普通匹配与竞技排位共享原版模型，训练来源与验证场次分开显示。下一圈与最终圈分别统计：在未参与该模型训练的历史对局中，实际圈心落入预测圈的比例；不足 5 场时待验证，不代表下一局成功概率。同一场的多个圈位不增加验证场次，未能输出预测的圈位也按未命中计。预测继续按原版自动选模。</p></details></section>
++<section><h2>自动采集与样本更新</h2><dl><dt>当前状态</dt><dd id="collector-state">—</dd><dt>训练诊断</dt><dd id="quality-state">—</dd><dt>采集计划</dt><dd id="interval">—</dd><dt>上次任务</dt><dd id="last-run">—</dd><dt>下次检查</dt><dd id="next-run">—</dd><dt>已收集比赛</dt><dd id="matches">—</dd><dt>圈型记录</dt><dd id="circles">—</dd></dl><p id="last-result" class="muted"></p><p id="task-error" class="error" role="status"></p><p id="quality-error" class="error" role="status"></p><p class="muted">状态更新于 <span id="updated">—</span></p></section>
++<section><h2>地图训练与滚动评测</h2><p class="muted">最近20场 · 先测后训。新指标从启用后的新对局开始累计；空窗时等待新对局。</p><ul id="models"></ul><details class="training-explanation"><summary>如何计算整场成功率</summary><p class="muted">每场新采集的对局先用旧模型预测，再加入训练；普通匹配与竞技排位分开统计，仍共享原版训练模型。下一圈与最终圈各取最近最多20场评测：所有可评估阶段的预测圈与实际圈面积重叠比（IoU，交集面积÷并集面积）都严格大于70%，整场才算成功；有实际目标但未能输出预测按失败计，没有目标的阶段不计。成功场次除以已测场次，不是逐阶段样本命中率。窗口按采集顺序滚动，可以跨多个模型；旧的已训对局不会回填。少于20场也显示当前比例和进度，零场等待新对局，不代表下一局成功概率。最新训练场次独立显示，预测继续按原版自动选模。</p></details></section>
 +</main></body></html>
 diff --git a/app/zones/web/settings.css b/app/zones/web/settings.css
 --- a/app/zones/web/settings.css
@@ -5350,7 +5890,7 @@ diff --git a/app/zones/web/settings.css b/app/zones/web/settings.css
 +.model-name{font-weight:600}.model-shared,.model-training,.model-validation{font-size:12px;color:#a4b0c1;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
 +.model-modes{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
 +.model-mode{min-width:0;border-top:1px solid #2a3342;padding-top:8px}.model-mode h3{font-size:13px;font-weight:500;margin:0}.model-training{margin:3px 0 7px}.model-history-title{font-size:11px;color:#a4b0c1;margin:0 0 5px}
-+.model-horizons{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.model-horizon{display:grid;gap:3px;align-content:start;min-width:0}.model-target{font-size:12px;color:#b4c1d2}.model-rate{font-size:16px;font-weight:500;color:#8ac7fa;font-variant-numeric:tabular-nums}.model-validation{font-size:11px;line-height:1.5}
++.model-horizons{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.model-horizon{display:grid;gap:3px;align-content:start;min-width:0}.model-target{font-size:12px;color:#b4c1d2}.model-rate{font-size:16px;font-weight:500;color:#8ac7fa;font-variant-numeric:tabular-nums}.model-validation,.model-window{font-size:11px;line-height:1.5}.model-window{color:#a4b0c1;font-variant-numeric:tabular-nums}
 +#models progress{width:100%;height:6px;accent-color:#68b8f3;border:0;border-radius:4px;overflow:hidden;background:#283547}
 +#models progress::-webkit-progress-bar{background:#283547}
 +#models progress::-webkit-progress-value{background:#68b8f3}
@@ -5481,7 +6021,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
      if (!active || version !== writeEpoch || sequence < appliedRead) return null;
      const changed = result.prediction_mode !== predictionMode;
      applySettings(result); appliedRead = sequence;
-@@ -147,14 +191,91 @@
+@@ -147,14 +191,96 @@
        void resumeWhenReady();
      }
    }
@@ -5518,7 +6058,6 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
 +          candidate.training_scope === 'mixed' &&
 +          ['native_holdout', 'post_training', 'unavailable'].includes(candidate.evaluation_kind) &&
 +          ['ready', 'insufficient_validation', 'pending', 'unavailable'].includes(candidate.quality_state);
-+        const identity = model && metadata && candidate.model_run_id === model.model_run_id;
 +        const group = node('div', 'model-mode model-mode-' + matchType);
 +        group.append(node('h3', '', modes[matchType]));
 +        const latest = metadata && own(candidate, 'latest_model_run_id') && own(candidate, 'latest_effective_training_matches') &&
@@ -5528,28 +6067,34 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
 +        const source = !latest ? '最新训练待统计' : candidate.latest_effective_training_matches === null ? '最新训练来源未记录'
 +          : `最新训练 ${count(candidate.latest_effective_training_matches)} 场`;
 +        group.append(node('p', 'model-training', source));
-+        group.append(node('p', 'model-history-title', '预测模型历史验证'));
++        group.append(node('p', 'model-history-title', '最近20场 · 先测后训'));
++        const rolling = record(candidate) && own(candidate, 'rolling') && record(candidate.rolling) ? candidate.rolling : null;
++        const rollingMetadata = rolling && ['policy', 'map_id', 'match_type', 'window_size', 'iou_threshold', 'threshold_comparison',
++          'match_success_rule', 'order_policy', 'history_scope', 'epoch_started_at'].every(key => own(rolling, key)) &&
++          rolling.policy === 'prequential-circle-iou-v1' && rolling.map_id === mapId && rolling.match_type === matchType &&
++          rolling.window_size === 20 && rolling.iou_threshold === 0.70 && rolling.threshold_comparison === 'strict_gt' &&
++          rolling.match_success_rule === 'all_evaluable_stages' && rolling.order_policy === 'persisted_arrival_sequence' &&
++          rolling.history_scope === 'new_matches_since_epoch' && (rolling.epoch_started_at === null ||
++            typeof rolling.epoch_started_at === 'string' && rolling.epoch_started_at.length <= 100 && Number.isFinite(new Date(rolling.epoch_started_at).getTime()));
 +        const horizons = node('div', 'model-horizons');
 +        for (const [kind, label] of [['next', '下一圈'], ['final', '最终圈']]) {
-+          const result = identity && own(candidate, kind) && record(candidate[kind]) ? candidate[kind] : null;
-+          const games = result && own(result, 'validation_match_count') && validCount(result.validation_match_count) ? result.validation_match_count : null;
-+          const countsValid = result && ['case_count', 'hit_count', 'prediction_case_count', 'unavailable_case_count'].every(key => own(result, key) && validCount(result[key])) &&
-+            games !== null && result.case_count >= games && result.case_count > 0 && result.prediction_case_count > 0 &&
-+            result.prediction_case_count <= result.case_count && result.hit_count <= result.prediction_case_count &&
-+            result.prediction_case_count + result.unavailable_case_count === result.case_count;
-+          const percent = result && own(result, 'quality_state') && result.quality_state === 'ready' && candidate.evaluation_kind !== 'unavailable' && games >= 5 && countsValid &&
-+            own(result, 'confidence_percent') && Number.isFinite(result.confidence_percent) && result.confidence_percent >= 0 && result.confidence_percent <= 100 &&
-+            Math.abs(result.confidence_percent - 100 * result.hit_count / result.case_count) <= 1e-7 ? result.confidence_percent : null;
++          const result = rollingMetadata && own(rolling, kind) && record(rolling[kind]) ? rolling[kind] : null;
++          const valid = result && ['quality_state', 'evaluated_matches', 'successful_matches', 'confidence_percent'].every(key => own(result, key)) &&
++            validCount(result.evaluated_matches) && result.evaluated_matches <= 20 && validCount(result.successful_matches) &&
++            result.successful_matches <= result.evaluated_matches && (result.evaluated_matches === 0
++              ? result.quality_state === 'waiting_new_matches' && result.successful_matches === 0 && result.confidence_percent === null
++              : rolling.epoch_started_at !== null && result.quality_state === (result.evaluated_matches === 20 ? 'full_window' : 'partial_window') &&
++                Number.isFinite(result.confidence_percent) && result.confidence_percent >= 0 && result.confidence_percent <= 100 &&
++                Math.abs(result.confidence_percent - 100 * result.successful_matches / result.evaluated_matches) <= 1e-7);
++          const percent = valid && result.evaluated_matches > 0 ? result.confidence_percent : null;
 +          const circle = node('div', 'model-horizon model-horizon-' + kind);
-+          circle.append(node('span', 'model-target', label), node('strong', 'model-rate', percent === null ? '待验证'
++          circle.append(node('span', 'model-target', label), node('strong', 'model-rate', !valid ? '评测待更新' : percent === null ? '等待新对局'
 +            : percent.toLocaleString(undefined, {maximumFractionDigits: 1}) + '%'));
-+          const validation = !model ? '暂无验证' : !result ? '验证待更新' : games === null ? '验证场次未知'
-+            : games < 5 ? `验证 ${count(games)}/5 场` : result.quality_state === 'unavailable' || candidate.evaluation_kind === 'unavailable' ? `验证不可用 · ${count(games)} 场`
-+            : (candidate.evaluation_kind === 'post_training' ? '训练后验证 ' : '留出验证 ') + count(games) + ' 场';
-+          circle.append(node('small', 'model-validation', validation));
++          circle.append(node('small', 'model-validation', valid ? `成功 ${count(result.successful_matches)} / 已测 ${count(result.evaluated_matches)}` : '等待新评测数据'));
++          circle.append(node('small', 'model-window', valid ? count(result.evaluated_matches) + '/20 场' : '不使用旧验证结果'));
 +          if (percent !== null) {
 +            const meter = node('progress', ''); meter.max = 100; meter.value = percent;
-+            if (typeof meter.setAttribute === 'function') meter.setAttribute('aria-label', mapName + modes[matchType] + label + '历史验证命中率');
++            if (typeof meter.setAttribute === 'function') meter.setAttribute('aria-label', mapName + modes[matchType] + label + '先测后训整场成功率');
 +            circle.append(meter);
 +          }
 +          horizons.append(circle);
@@ -5571,12 +6116,12 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
 -      : status.running ? '正在更新圈样本' : code === 'PUBG_AUTH_REJECTED' ? '认证被拒'
 +    const quality = status.quality_evaluation && typeof status.quality_evaluation === 'object' && !Array.isArray(status.quality_evaluation) ? status.quality_evaluation : null;
 +    const qualityState = quality && ['pending', 'running', 'error', 'idle'].includes(quality.state) ? quality.state : null;
-+    text('collector-state', status.running ? qualityState === 'running' ? '正在更新验证指标' : status.api_key_configured ? '正在更新圈样本' : '正在处理现有任务'
++    text('collector-state', status.running ? qualityState === 'running' ? '正在更新训练诊断' : status.api_key_configured ? '正在更新圈样本' : '正在处理现有任务'
 +      : !status.api_key_configured ? '等待 API Key' : code === 'PUBG_AUTH_REJECTED' ? '认证被拒'
        : code === 'PUBG_RATE_LIMITED' ? '等待限流解除' : code ? '等待重试' : status.enabled ? '等待下次自动更新' : '等待自动任务');
      text('interval', `${count(status.interval_minutes)} 分钟 / 每批 ${count(status.batch_size)} 场`);
      text('last-run', time(status.last_run_at)); text('next-run', time(status.next_run_at));
-@@ -163,22 +284,34 @@
+@@ -163,22 +289,34 @@
      text('last-result', `检查 ${count(result.checked)} · 新增 ${count(result.inserted)} · 跳过 ${count(result.skipped)} · 失败 ${count(result.failed)}`);
      text('updated', new Date().toLocaleTimeString());
      text('task-error', problem);
@@ -5594,16 +6139,16 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
 -    }
 +    const qualityStatus = byId('quality-state'), qualityError = byId('quality-error');
 +    if (qualityStatus) {
-+      qualityStatus.textContent = qualityState === 'running' ? '正在更新历史验证'
-+        : qualityState === 'pending' ? '等待更新历史验证'
-+        : qualityState === 'error' ? '评估失败，等待重试'
-+        : qualityState === 'idle' ? '暂无待处理评估' : '验证状态待更新';
++      qualityStatus.textContent = qualityState === 'running' ? '正在更新训练诊断'
++        : qualityState === 'pending' ? '等待更新训练诊断'
++        : qualityState === 'error' ? '诊断失败，等待重试'
++        : qualityState === 'idle' ? '暂无待处理诊断' : '诊断状态待更新';
 +      if (qualityState === 'error' && typeof quality.next_retry_at === 'string' && time(quality.next_retry_at) !== '—') {
 +        qualityStatus.textContent += ' · 下次重试 ' + time(quality.next_retry_at);
 +      }
 +    }
 +    if (qualityError) qualityError.textContent = qualityState === 'error' || qualityState && quality.last_error_code === 'ANALYZER_QUALITY_FAILED'
-+      ? '历史验证指标更新失败，系统会单独重试。' : '';
++      ? '训练诊断更新失败，系统会单独重试。' : '';
 +    renderModels(status);
 +  }
 +  function applyStatusMode(status, sequence) {
@@ -5624,7 +6169,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
    }
    function drainRefresh() {
      if (refreshPending && active && authorized && initialized && !document.hidden && !refreshing && !saving &&
-@@ -189,16 +322,21 @@
+@@ -189,16 +327,21 @@
      if (refreshing) { if (afterWrite) refreshPending = true; return; }
      if (saving && !afterWrite) { refreshPending = true; return; }
      refreshPending = false; refreshing = true; clearTimeout(timer);
@@ -5650,7 +6195,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
    byId('key-form').addEventListener('submit', async event => {
      event.preventDefault();
      if (!authorized || saving) return;
-@@ -248,6 +386,7 @@
+@@ -248,6 +391,7 @@
      if (document.hidden) { resumePending = true; for (const controller of controllers) controller.abort(); }
      else requestResume();
    });
@@ -5658,7 +6203,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
    window.addEventListener('pagehide', () => {
      active = false; resumePending = true; clearTimeout(timer); clearTimeout(authTimer); clearTimeout(reconcileTimer);
      for (const controller of controllers) controller.abort();
-@@ -271,6 +410,7 @@
+@@ -271,6 +415,7 @@
    });
    async function initialize({recovery = false} = {}) {
      if (!active || document.hidden || initializing || initialized) return;
@@ -5666,7 +6211,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
      initializing = true; clearTimeout(timer);
      try {
        const session = await request('/session');
-@@ -284,6 +424,8 @@
+@@ -284,6 +429,8 @@
        initialized = true; initFailures = 0; authRequested = false; authAttempts = 0; clearTimeout(authTimer);
        if (firstSync) { initialSettingsSynced = true; notifySettingsChanged(); }
        byId('key-form').hidden = false; setSaving(saving);
@@ -5675,7 +6220,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
        if (pendingMode) {
          if (settings.prediction_mode === pendingMode.mode) {
            pendingMode = null; clearTimeout(reconcileTimer); text('mode-message', '已核对实际模式，保存已确认。');
-@@ -301,7 +443,7 @@
+@@ -301,7 +448,7 @@
        else if (++initFailures <= 5) {
          text('connection', '服务暂不可用，稍后自动重试。');
          timer = setTimeout(initialize, [1000, 3000, 10000, 30000, 30000][initFailures - 1]);
@@ -5684,7 +6229,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
      } finally {
        initializing = false;
        const pending = authCompletionPending; authCompletionPending = 0;
-@@ -310,5 +452,5 @@
+@@ -310,5 +457,5 @@
        drainRefresh();
      }
    }

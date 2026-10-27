@@ -23,6 +23,8 @@ COPY app/zones/backend/app/morse_native /app/zones/backend/app/morse_native
 COPY app/zones/backend/app/db/migrations/012_morse_native.sql /app/zones/backend/app/db/migrations/012_morse_native.sql
 COPY app/zones/backend/app/db/migrations/013_model_quality.sql /app/zones/backend/app/db/migrations/013_model_quality.sql
 COPY app/zones/backend/app/db/migrations/014_serving_quality.sql /app/zones/backend/app/db/migrations/014_serving_quality.sql
+COPY app/zones/backend/app/services/prequential.py /app/zones/backend/app/services/prequential.py
+COPY app/zones/backend/app/db/migrations/015_prequential_quality.sql /app/zones/backend/app/db/migrations/015_prequential_quality.sql
 COPY source-manifest.json /opt/gixradar-build.json
 
 ARG VERSION=analyzer
