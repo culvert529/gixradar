@@ -3519,7 +3519,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
  from app.core.errors import AppError
  from app.core.timestamps import parsed_time, timestamp
  from app.db.connection import connect_database, database_connection
-@@ -13,9 +14,13 @@
+@@ -13,9 +14,15 @@
  from app.services.pubg_api import PubgApiClient, Cancelled, path_segment, telemetry_url_allowed
  from app.services.telemetry_parser import extract_circles, insert_circles
  from app.services.training import AnalyzerTrainer
@@ -3527,13 +3527,16 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
 +from app.services.prequential import score_match, pending_training, acknowledge_training
  from app.services.analyzer import ENGINE, ALGORITHM, canonical_mode, model_summaries
  
- INTERVAL_SECONDS = 1800
+-INTERVAL_SECONDS = 1800
++INTERVAL_SECONDS = 300
++ERROR_RETRY_DELAYS = (60, 300, 900, 1800)
++AUTH_BACKOFF_SECONDS = 1800
 +QUALITY_RETRY_DELAYS = (60, 300, 900)
 +BACKFILL_PENDING_PREFIX = "prequential_backfill:"
  BATCH_SIZE = 20
  SCAN_LIMIT = 100
  RETRY_BATCH_SIZE = 5
-@@ -50,7 +55,7 @@
+@@ -50,7 +57,7 @@
      data=payload.get("data") if isinstance(payload,dict) else None
      if not isinstance(data,(dict,list)):
          raise AppError("PUBG_RESPONSE_INVALID","Official sample data is incomplete",502)
@@ -3542,7 +3545,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
      for item in data if isinstance(data,list) else [data]:
          if not isinstance(item,dict):
              continue
-@@ -60,6 +65,7 @@
+@@ -60,6 +67,7 @@
          if not isinstance(refs,list):
              continue
          valid=True
@@ -3550,7 +3553,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
          for ref in refs[:1000]:
              value=ref.get("id") if isinstance(ref,dict) else None
              try:
-@@ -70,9 +76,15 @@
+@@ -70,9 +78,15 @@
                  seen.add(value);result.append(value)
              if len(result)>=1000:
                  return result
@@ -3567,7 +3570,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
  
  class CircleCollector:
      def __init__(self, settings: Settings, *, client_factory=None, clock=time.time):
-@@ -83,7 +95,10 @@
+@@ -83,7 +97,10 @@
          self.running=False;self.next_run_at=None;self.last_run_at=None
          self.last_result=empty_result();self.last_error_code=None;self.failures=0
          self._scheduled_at=None;self._key_generation=0
@@ -3578,7 +3581,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
          with database_connection(settings.database_path) as connection:
              self._seed_legacy(connection)
              self._seed_retry_legacy(connection)
-@@ -113,6 +128,9 @@
+@@ -113,15 +130,23 @@
                  return  # Old two-field summaries remain readable.
              if value.get("last_run_at") is not None and (stamp is None or stamp>self.clock()+60):
                  return
@@ -3588,7 +3591,22 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
              error=value.get("last_error_code");failures=value.get("failures");due=value.get("next_run_at")
              if error is not None and (not isinstance(error,str) or error not in ERROR_CODES):
                  return
-@@ -132,6 +150,8 @@
+             if type(failures) is not int or not 0<=failures<=255 or (error is None and failures):
+                 return
+-            if due is not None and (timestamp(due) is None or due>self.clock()+INTERVAL_SECONDS+60):
++            max_delay=max(INTERVAL_SECONDS,AUTH_BACKOFF_SECONDS,*ERROR_RETRY_DELAYS)
++            if due is not None and (timestamp(due) is None or due>self.clock()+max_delay+60):
+                 return
+             if due is not None and stamp is not None and due<stamp:
+                 return
++            if error is None and due is not None and stamp is not None:
++                # Adopt the shorter normal cadence without erasing an overrun's
++                # cooldown or shortening any persisted provider-error backoff.
++                due=min(due,max(self.clock()+60,stamp+INTERVAL_SECONDS))
+             self.last_error_code=error;self.failures=failures;self._scheduled_at=due
+             self.next_run_at=due if self.settings.pubg_api_key else None
+         except (ValueError,TypeError,AttributeError,OverflowError):
+@@ -132,6 +157,8 @@
          with self.guard:
              value={"version":2,"last_run_at":self.last_run_at,"last_result":self.last_result,
                     "last_error_code":self.last_error_code,"failures":self.failures,"next_run_at":self._scheduled_at}
@@ -3597,7 +3615,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
              try:
                  with database_connection(self.settings.database_path) as connection:
                      connection.execute("INSERT OR REPLACE INTO collector_state(key,value) VALUES('summary',?)",
-@@ -169,6 +189,7 @@
+@@ -169,6 +196,7 @@
              if marker==self._key_marker:
                  return False
              self._key_marker=marker;self._key_generation+=1
@@ -3605,7 +3623,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
              client=self.client
              self.next_run_at=self.clock() if self.settings.pubg_api_key else None
              self._scheduled_at=self.next_run_at
-@@ -185,7 +206,12 @@
+@@ -185,7 +213,12 @@
              self.running = True
          try:
              with database_connection(self.settings.database_path) as connection:
@@ -3619,7 +3637,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
          except Cancelled:
              pass
          except Exception:
-@@ -197,13 +223,23 @@
+@@ -197,21 +230,31 @@
          while not self.stop_event.is_set():
              with self.guard:
                  due=self.next_run_at
@@ -3638,14 +3656,23 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
              if not self.settings.pubg_api_key:
                  with self.guard:
                      self.next_run_at=None
-+                continue
+                 continue
 +            # A local cache deadline must not bring the next official batch
 +            # forward. Explicit trigger/Key-change wakeups retain their meaning.
 +            if not woken and (due is None or due>self.clock()):
-                 continue
++                continue
              try:
                  self.run_once()
-@@ -242,13 +278,16 @@
+             except Exception:
+                 # No raw exception, URL, credential or telemetry is logged.
+                 with self.guard:
+                     self.last_error_code="COLLECTOR_INTERNAL_ERROR"
+-                    self.next_run_at=self.clock()+INTERVAL_SECONDS
++                    self.next_run_at=self.clock()+ERROR_RETRY_DELAYS[-1]
+                     self._scheduled_at=self.next_run_at
+                 self._persist_summary()
+ 
+@@ -242,13 +285,16 @@
                          (s.state='failed' AND s.retry_after<=?))
                      ORDER BY COALESCE(s.retry_after,r.first_seen_at),r.match_id LIMIT ?""",
                      (self.clock(),self.clock(),RETRY_BATCH_SIZE)).fetchall()
@@ -3664,7 +3691,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
                      error=preferred_error(error,current)
                      if current in ("PUBG_RATE_LIMITED","PUBG_AUTH_REJECTED"):
                          halt=True;break
-@@ -265,6 +304,8 @@
+@@ -265,6 +311,8 @@
                  except ValueError:
                      offset=0
                  window=(refs[offset:]+refs[:offset])[:max(0,SCAN_LIMIT-stats["checked"])]
@@ -3673,7 +3700,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
                  consumed=0
                  for match_id in window:
                      self._check_cancelled(client)
-@@ -285,23 +326,26 @@
+@@ -285,23 +333,26 @@
                          continue
                      new_candidates+=1
                      processed.add(match_id)
@@ -3704,7 +3731,18 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
          finally:
              if started:
                  with self.guard:
-@@ -371,6 +415,7 @@
+@@ -312,8 +363,8 @@
+                         self.last_error_code=error
+                         if error:
+                             self.failures=min(255,self.failures+1)
+-                            delay=[60,300,900,1800][min(self.failures-1,3)]
+-                            if error=="PUBG_AUTH_REJECTED":delay=INTERVAL_SECONDS
++                            delay=ERROR_RETRY_DELAYS[min(self.failures-1,len(ERROR_RETRY_DELAYS)-1)]
++                            if error=="PUBG_AUTH_REJECTED":delay=AUTH_BACKOFF_SECONDS
+                         else:
+                             self.failures=0;delay=INTERVAL_SECONDS
+                         # Nominal start-to-start cadence, with an overrun cooldown.
+@@ -371,6 +422,7 @@
              if not isinstance(events,list):
                  raise AppError("PUBG_RESPONSE_INVALID","Official telemetry data is incomplete",502)
              circles=extract_circles(events,config["world_size"])
@@ -3712,7 +3750,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
              ended=not circles and any(isinstance(event,dict) and event.get("_T")=="LogMatchEnd" for event in events)
              del events,metadata,url
              if not circles:
-@@ -378,11 +423,52 @@
+@@ -378,11 +430,52 @@
                      raise AppError("PUBG_RESPONSE_INVALID","Official circle data is incomplete",502)
                  self._seen(connection,match_id,"excluded",code="NO_VALID_CIRCLES")
                  connection.commit();stats["skipped"]+=1;return None
@@ -3765,7 +3803,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
          except Cancelled:
              connection.rollback();raise
          except AppError as exc:
-@@ -462,18 +548,140 @@
+@@ -462,18 +555,140 @@
      def _train_changed(self, connection, cancel):
          if cancel.is_set() or self.stop_event.is_set():
              raise Cancelled()
@@ -3888,8 +3926,9 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
      def status(self):
          with self.guard:
              result={"enabled":True,"api_key_configured":bool(self.settings.pubg_api_key),"running":self.running,
+-                    "interval_minutes":30,"batch_size":20,"next_run_at":iso(self.next_run_at),
 +                    "prediction_mode":self.settings.prediction_mode,
-                     "interval_minutes":30,"batch_size":20,"next_run_at":iso(self.next_run_at),
++                    "interval_minutes":INTERVAL_SECONDS//60,"batch_size":BATCH_SIZE,"next_run_at":iso(self.next_run_at),
                      "last_run_at":iso(self.last_run_at),"last_result":dict(self.last_result),"last_error_code":self.last_error_code}
 +            result["quality_evaluation"]={
 +                "state":("running" if self._quality_running else "idle" if not self._quality_pending else
