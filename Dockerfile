@@ -11,6 +11,7 @@ COPY app/zones/backend/app/services/training.py /app/zones/backend/app/services/
 COPY app/zones/backend/app/services/quality.py /app/zones/backend/app/services/quality.py
 COPY app/zones/backend/app/services/collector.py /app/zones/backend/app/services/collector.py
 COPY app/zones/backend/app/services/pubg_api.py /app/zones/backend/app/services/pubg_api.py
+COPY app/zones/backend/app/services/telemetry_parser.py /app/zones/backend/app/services/telemetry_parser.py
 COPY app/zones/web/settings.js /app/zones/web/settings.js
 COPY app/zones/web/settings.css /app/zones/web/settings.css
 COPY app/zones/web/index.html /app/zones/web/index.html
@@ -21,6 +22,7 @@ COPY app/zones/backend/app/main.py /app/zones/backend/app/main.py
 COPY app/zones/backend/app/morse_native /app/zones/backend/app/morse_native
 COPY app/zones/backend/app/db/migrations/012_morse_native.sql /app/zones/backend/app/db/migrations/012_morse_native.sql
 COPY app/zones/backend/app/db/migrations/013_model_quality.sql /app/zones/backend/app/db/migrations/013_model_quality.sql
+COPY app/zones/backend/app/db/migrations/014_serving_quality.sql /app/zones/backend/app/db/migrations/014_serving_quality.sql
 COPY source-manifest.json /opt/gixradar-build.json
 
 ARG VERSION=analyzer
