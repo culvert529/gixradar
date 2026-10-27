@@ -555,6 +555,38 @@ new file mode 100644
 +    match_id TEXT NOT NULL,
 +    created_at TEXT NOT NULL
 +);
+diff --git a/app/zones/backend/app/db/migrations/016_sample_queue.sql b/app/zones/backend/app/db/migrations/016_sample_queue.sql
+new file mode 100644
+--- /dev/null
++++ b/app/zones/backend/app/db/migrations/016_sample_queue.sql
+@@ -0,0 +1,27 @@
++-- Additive daily source checkpoints and an unprocessed-ID queue. No model/game row is changed.
++CREATE TABLE IF NOT EXISTS collector_sample_sources (
++    source_key TEXT PRIMARY KEY,
++    kind TEXT NOT NULL CHECK(kind IN ('latest','history')),
++    window_end REAL,
++    state TEXT NOT NULL CHECK(state IN ('active','pending','done','expired')),
++    next_check_at REAL,
++    last_checked_at REAL,
++    last_success_at REAL,
++    last_changed_at REAL,
++    fingerprint TEXT,
++    last_state TEXT NOT NULL DEFAULT 'pending' CHECK(last_state IN ('pending','updated','unchanged','error')),
++    received INTEGER NOT NULL DEFAULT 0,
++    queued INTEGER NOT NULL DEFAULT 0,
++    known INTEGER NOT NULL DEFAULT 0,
++    error_code TEXT,
++    failures INTEGER NOT NULL DEFAULT 0
++);
++CREATE INDEX IF NOT EXISTS idx_sample_sources_due ON collector_sample_sources(state,next_check_at);
++CREATE UNIQUE INDEX IF NOT EXISTS idx_sample_source_window ON collector_sample_sources(kind,window_end) WHERE kind='history';
++CREATE TABLE IF NOT EXISTS collector_sample_queue (
++    match_id TEXT PRIMARY KEY,
++    first_seen_at REAL NOT NULL,
++    expires_at REAL NOT NULL,
++    source_key TEXT NOT NULL
++);
++CREATE INDEX IF NOT EXISTS idx_sample_queue_expiry ON collector_sample_queue(expires_at,first_seen_at,match_id);
 diff --git a/app/zones/backend/app/db/repository.py b/app/zones/backend/app/db/repository.py
 --- a/app/zones/backend/app/db/repository.py
 +++ /dev/null
@@ -3517,7 +3549,7 @@ diff --git a/app/zones/backend/app/services/analyzer.py b/app/zones/backend/app/
 diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app/services/collector.py
 --- a/app/zones/backend/app/services/collector.py
 +++ b/app/zones/backend/app/services/collector.py
-@@ -1,23 +1,36 @@
+@@ -1,23 +1,38 @@
  """One cooperative worker: collect circles, commit, then train changed datasets."""
  from __future__ import annotations
  from datetime import datetime, UTC
@@ -3527,6 +3559,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
  import threading
  import time
 -from app.core.config import Settings
++from app.services import sample_queue
 +from app.core.config import Settings, valid_key_revision
  from app.core.errors import AppError
  from app.core.timestamps import parsed_time, timestamp
@@ -3554,13 +3587,14 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
 +BATCH_DEADLINE_SECONDS = 300
 +SAMPLE_WINDOWS = 14
 +SAMPLE_REQUEST_LIMIT = 10
++SAMPLE_REFERENCE_LIMIT = 14000
 +BATCH_STOP_REASONS = frozenset({"target_met","deadline","candidate_exhausted","scan_limit",
 +    "sample_rate_limit","provider_auth","provider_rate_limit","sample_error","training_blocked",
-+    "cancelled","internal_error"})
++    "cancelled","internal_error","queue_empty","awaiting_samples"})
  RETRY_BATCH_SIZE = 5
  EXPIRE_BATCH_SIZE = 10
  # The default official sample covers the previous day. An unknown creation time
-@@ -50,7 +63,7 @@
+@@ -50,7 +65,7 @@
      data=payload.get("data") if isinstance(payload,dict) else None
      if not isinstance(data,(dict,list)):
          raise AppError("PUBG_RESPONSE_INVALID","Official sample data is incomplete",502)
@@ -3569,19 +3603,25 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
      for item in data if isinstance(data,list) else [data]:
          if not isinstance(item,dict):
              continue
-@@ -60,6 +73,7 @@
+@@ -60,7 +75,8 @@
          if not isinstance(refs,list):
              continue
          valid=True
+-        for ref in refs[:1000]:
 +        nonempty_refs=nonempty_refs or bool(refs)
-         for ref in refs[:1000]:
++        for ref in refs:
              value=ref.get("id") if isinstance(ref,dict) else None
              try:
-@@ -70,20 +84,31 @@
+                 value=path_segment(value)
+@@ -68,22 +84,33 @@
+                 continue
+             if value not in seen:
                  seen.add(value);result.append(value)
-             if len(result)>=1000:
-                 return result
+-            if len(result)>=1000:
+-                return result
 -    if not valid:
++            if len(result)>SAMPLE_REFERENCE_LIMIT:
++                raise AppError("PUBG_RESPONSE_TOO_LARGE","Official sample list exceeded its limit",502)
 +    if not valid or nonempty_refs and not result:
          raise AppError("PUBG_RESPONSE_INVALID","Official sample data is incomplete",502)
      return result
@@ -3603,7 +3643,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
          self.guard=threading.RLock();self.batch_lock=threading.Lock();self.thread=None;self.client=None
          self.running=False;self.next_run_at=None;self.last_run_at=None
          self.last_result=empty_result();self.last_error_code=None;self.failures=0
-+        self.last_batch=None
++        self.last_batch=None;self._phase="idle"
          self._scheduled_at=None;self._key_generation=0
 +        self._quality_pending=set();self._quality_attempts=0
 +        self._quality_next_at=None;self._quality_running=False
@@ -3612,34 +3652,42 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
          with database_connection(settings.database_path) as connection:
              self._seed_legacy(connection)
              self._seed_retry_legacy(connection)
-@@ -113,17 +138,39 @@
+@@ -109,29 +136,57 @@
+             stamp=timestamp(value.get("last_run_at"))
+             if stamp is not None and stamp<=self.clock()+60:
+                 self.last_run_at=stamp
+-            if type(value.get("version")) is not int or value["version"]!=2:
++            if type(value.get("version")) is not int or value["version"] not in (2,3):
                  return  # Old two-field summaries remain readable.
++            if value["version"]==3 and value.get("collection_policy")!=sample_queue.POLICY:
++                return
              if value.get("last_run_at") is not None and (stamp is None or stamp>self.clock()+60):
-                 return
++                return
 +            revision=value.get("key_revision")
 +            if not valid_key_revision(revision) or revision!=self._key_revision:
-+                return
+                 return
              error=value.get("last_error_code");failures=value.get("failures");due=value.get("next_run_at")
              if error is not None and (not isinstance(error,str) or error not in ERROR_CODES):
                  return
              if type(failures) is not int or not 0<=failures<=255 or (error is None and failures):
                  return
 -            if due is not None and (timestamp(due) is None or due>self.clock()+INTERVAL_SECONDS+60):
-+            max_delay=max(INTERVAL_SECONDS,AUTH_BACKOFF_SECONDS,*ERROR_RETRY_DELAYS,
++            max_delay=max(sample_queue.INTERVAL_SECONDS if value["version"]==3 else INTERVAL_SECONDS,AUTH_BACKOFF_SECONDS,*ERROR_RETRY_DELAYS,
 +                          86400 if error=="PUBG_RATE_LIMITED" else 0)
 +            if due is not None and (timestamp(due) is None or due>self.clock()+max_delay+60):
                  return
              if due is not None and stamp is not None and due<stamp:
                  return
-+            if error is None and due is not None and stamp is not None:
++            if value["version"]==2 and error is None and due is not None and stamp is not None:
 +                # Adopt the shorter normal cadence without erasing an overrun's
 +                # cooldown or shortening any persisted provider-error backoff.
 +                due=min(due,max(self.clock()+60,stamp+INTERVAL_SECONDS))
              self.last_error_code=error;self.failures=failures;self._scheduled_at=due
              self.next_run_at=due if self.settings.pubg_api_key else None
 +            batch=value.get("last_batch")
-+            if (isinstance(batch,dict) and set(batch)=={"target","inserted","target_met","stop_reason",
-+                    "sample_calls","attempted_matches","elapsed_seconds","deadline_overrun"} and
++            batch_keys={"target","inserted","target_met","stop_reason","sample_calls","attempted_matches","elapsed_seconds","deadline_overrun"}
++            if (isinstance(batch,dict) and set(batch) in (batch_keys,batch_keys|{"collection_policy"}) and
++                    ("collection_policy" not in batch or batch["collection_policy"]==sample_queue.POLICY) and
 +                    type(batch.get("target")) is int and batch["target"]==BATCH_SIZE and
 +                    type(batch.get("inserted")) is int and batch["inserted"]==self.last_result["inserted"] and
 +                    0<=batch["inserted"]<=BATCH_SIZE and type(batch.get("target_met")) is bool and
@@ -3653,11 +3701,12 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
          except (ValueError,TypeError,AttributeError,OverflowError):
              pass
  
-@@ -131,7 +178,10 @@
+     def _persist_summary(self):
          # Serialize snapshot + write against Key changes and batch completion.
          with self.guard:
-             value={"version":2,"last_run_at":self.last_run_at,"last_result":self.last_result,
+-            value={"version":2,"last_run_at":self.last_run_at,"last_result":self.last_result,
 -                   "last_error_code":self.last_error_code,"failures":self.failures,"next_run_at":self._scheduled_at}
++            value={"version":3,"collection_policy":sample_queue.POLICY,"last_run_at":self.last_run_at,"last_result":self.last_result,
 +                   "last_error_code":self.last_error_code,"failures":self.failures,"next_run_at":self._scheduled_at,
 +                   "last_batch":self.last_batch}
 +            if self._key_revision is not None:
@@ -3665,16 +3714,54 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
              try:
                  with database_connection(self.settings.database_path) as connection:
                      connection.execute("INSERT OR REPLACE INTO collector_state(key,value) VALUES('summary',?)",
-@@ -169,6 +219,7 @@
+@@ -143,8 +198,14 @@
+         with self.guard:
+             if self.thread is not None:
+                 return
+-            self.next_run_at=(self._scheduled_at if self._scheduled_at is not None else self.clock()) if self.settings.pubg_api_key else None
+-            self._scheduled_at=self.next_run_at
++            if self.settings.pubg_api_key:
++                with database_connection(self.settings.database_path) as connection:
++                    due=sample_queue.next_activity(connection,self.clock())
++                if self.last_error_code and self._scheduled_at is not None:
++                    due=max(due,self._scheduled_at)
++                self.next_run_at=due;self._scheduled_at=due
++            else:
++                self.next_run_at=None
+             self.thread=threading.Thread(target=self._loop,name="gixradar-circle-collector",daemon=True)
+             self.thread.start()
+ 
+@@ -168,13 +229,21 @@
+             marker=self._key_digest()
              if marker==self._key_marker:
                  return False
++            previous_error=self.last_error_code
              self._key_marker=marker;self._key_generation+=1
 +            self._key_revision=self.settings._key_revision
              client=self.client
-             self.next_run_at=self.clock() if self.settings.pubg_api_key else None
-             self._scheduled_at=self.next_run_at
-@@ -185,7 +236,12 @@
-             self.running = True
+-            self.next_run_at=self.clock() if self.settings.pubg_api_key else None
+-            self._scheduled_at=self.next_run_at
+-            self.last_error_code=None;self.failures=0
++            if previous_error!="PUBG_RATE_LIMITED":
++                self._scheduled_at=self.clock() if self.settings.pubg_api_key else None
++                self.last_error_code=None;self.failures=0
++            self.next_run_at=self._scheduled_at if self.settings.pubg_api_key else None
+         if client is not None:
+             client.cancel()
++        if self.settings.pubg_api_key:
++            with database_connection(self.settings.database_path) as connection:
++                # The old failure may be durable before this worker publishes
++                # its global error. Reset AUTH sources by their own state.
++                connection.execute("UPDATE collector_sample_sources SET next_check_at=?,error_code=NULL,last_state='pending',failures=0 WHERE error_code='PUBG_AUTH_REJECTED' AND state IN ('active','pending')",(self.clock(),))
+         self._persist_summary()
+         self.wake.set()
+         return True
+@@ -182,10 +251,15 @@
+     def _loop(self):
+         # Local bootstrap runs even without a key; no official request is made.
+         with self.guard:
+-            self.running = True
++            self.running = True;self._phase="quality"
          try:
              with database_connection(self.settings.database_path) as connection:
 -                AnalyzerTrainer(connection, self.config, self.settings.model_dir, self.stop_event).sync_all()
@@ -3687,7 +3774,12 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
          except Cancelled:
              pass
          except Exception:
-@@ -197,21 +253,31 @@
+@@ -193,17 +267,27 @@
+                 self.last_error_code = self.last_error_code or "ANALYZER_BOOTSTRAP_FAILED"
+         finally:
+             with self.guard:
+-                self.running = False
++                self.running = False;self._phase="idle"
          while not self.stop_event.is_set():
              with self.guard:
                  due=self.next_run_at
@@ -3706,14 +3798,14 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
              if not self.settings.pubg_api_key:
                  with self.guard:
                      self.next_run_at=None
-                 continue
++                continue
 +            # A local cache deadline must not bring the next official batch
 +            # forward. Explicit trigger/Key-change wakeups retain their meaning.
 +            if not woken and (due is None or due>self.clock()):
-+                continue
+                 continue
              try:
                  self.run_once()
-             except Exception:
+@@ -211,7 +295,7 @@
                  # No raw exception, URL, credential or telemetry is logged.
                  with self.guard:
                      self.last_error_code="COLLECTOR_INTERNAL_ERROR"
@@ -3722,20 +3814,25 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
                      self._scheduled_at=self.next_run_at
                  self._persist_summary()
  
-@@ -219,7 +285,8 @@
+@@ -219,110 +303,216 @@
          if not self.batch_lock.acquire(blocking=False):
              return False
          stats=empty_result();error=None;cancelled=False;started=False;generation=None
 -        batch_cancel=threading.Event()
-+        batch_cancel=threading.Event();processed=set();sample_calls=0;reason="candidate_exhausted";client=None
-+        began_monotonic=self.monotonic()
++        batch_cancel=threading.Event();processed=set();sample_calls=0;reason="awaiting_samples";client=None
++        began_monotonic=self.monotonic();began_clock=self.clock();processing=False;fresh_admitted=False;fresh_started=False
          try:
              if self.stop_event.is_set() or not self.settings.pubg_api_key:
                  return False
-@@ -228,13 +295,13 @@
+             with self.guard:
+                 if self.stop_event.is_set() or not self.settings.pubg_api_key:
                      return False
++                # A manual wake does not bypass a durable provider backoff.
++                if self.last_error_code in ("PUBG_AUTH_REJECTED","PUBG_RATE_LIMITED") and self._scheduled_at is not None and self._scheduled_at>self.clock():
++                    return False
                  started=True;generation=self._key_generation
-                 self.running=True;self.last_run_at=self.clock();self.next_run_at=None
+-                self.running=True;self.last_run_at=self.clock();self.next_run_at=None
++                self.running=True;self._phase="discovering";self.next_run_at=None
 +                self._batch_deadline=began_monotonic+BATCH_DEADLINE_SECONDS
                  self.client=self.client_factory(self.settings.pubg_api_key,batch_cancel)
                  client=self.client
@@ -3746,57 +3843,111 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
 -                # Failed/interrupted IDs survive the latest sample/date window.
 -                # Reserve at most five HTTP candidates for them, leaving fresh
 -                # samples capacity even when a persistent failure queue is large.
++                sample_queue.ensure_latest(connection,self.clock())
                  self._expire_retries(connection,stats)
++                expired=sample_queue.prune_queue(connection,self.clock())
++                stats["checked"]+=expired;stats["skipped"]+=expired
++                halt=False;training_blocked=False
++                for _ in range(sample_queue.DISCOVERY_PAGES):
++                    self._check_budget(client)
++                    source=sample_queue.next_source(connection,self.clock())
++                    if source is None:
++                        break
++                    if not self._sample_slot(connection,client):
++                        reason="sample_rate_limit";break
++                    try:
++                        self._check_budget(client);sample_calls+=1
++                        payload=(client.samples(iso(source["window_end"])) if source["kind"]=="history" else client.samples())
++                        self._check_budget(client);refs=sample_refs(payload)
++                        sample_queue.complete_source(connection,source,refs,self.clock(),lambda:self._check_budget(client))
++                    except AppError as exc:
++                        code=exc.code if exc.code in ERROR_CODES else "PUBG_RESPONSE_INVALID"
++                        error=preferred_error(error,code)
++                        delay=ERROR_RETRY_DELAYS[min(source["failures"],len(ERROR_RETRY_DELAYS)-1)]
++                        if code=="PUBG_AUTH_REJECTED":delay=AUTH_BACKOFF_SECONDS
++                        elif code=="PUBG_RATE_LIMITED":delay=max(delay,min(86400,getattr(client,"retry_after_seconds",0)))
++                        # Serialize only the short checkpoint with Key change;
++                        # a cancelled old response must never poison the new Key.
++                        with self.guard:
++                            self._check_cancelled(client)
++                            if generation!=self._key_generation:
++                                raise Cancelled()
++                            sample_queue.fail_source(connection,source,self.clock(),code,delay)
++                        reason=("provider_auth" if code=="PUBG_AUTH_REJECTED" else "provider_rate_limit" if code=="PUBG_RATE_LIMITED" else "sample_error")
++                        if code in ("PUBG_AUTH_REJECTED","PUBG_RATE_LIMITED"):
++                            halt=True;break
                  due=connection.execute("""SELECT r.match_id FROM collector_retry_meta r
                      LEFT JOIN collector_seen s ON s.match_id=r.match_id
-@@ -242,87 +309,206 @@
+                     WHERE r.expires_at>? AND (s.match_id IS NULL OR
                          (s.state='failed' AND s.retry_after<=?))
                      ORDER BY COALESCE(s.retry_after,r.first_seen_at),r.match_id LIMIT ?""",
                      (self.clock(),self.clock(),RETRY_BATCH_SIZE)).fetchall()
 -                processed=set();new_candidates=0;halt=False
-+                scanned=set();halt=False;training_blocked=False
-                 names={name:config for config in self.config.list_maps() for name in config["telemetry_names"]}
-                 for row in due:
+-                names={name:config for config in self.config.list_maps() for name in config["telemetry_names"]}
+-                for row in due:
 -                    match_id=row["match_id"]
 -                    self._check_cancelled(client)
 -                    stats["checked"]+=1;new_candidates+=1;processed.add(match_id)
 -                    current=self._process_match(connection,client,match_id,names,stats)
-+                    self._check_budget(client)
-+                    match_id=row["match_id"];scanned.add(match_id);processed.add(match_id)
-+                    stats["checked"]+=1
-+                    try:
-+                        current=self._process_match(connection,client,match_id,names,stats)
-+                    except _TrainingBlocked as blocked:
-+                        error=preferred_error(error,blocked.code);training_blocked=True;reason="training_blocked";break
-                     error=preferred_error(error,current)
-                     if current in ("PUBG_RATE_LIMITED","PUBG_AUTH_REJECTED"):
+-                    error=preferred_error(error,current)
+-                    if current in ("PUBG_RATE_LIMITED","PUBG_AUTH_REJECTED"):
 -                        halt=True;break
 -                refs=[]
 -                if not halt:
-+                        halt=True;reason="provider_auth" if current=="PUBG_AUTH_REJECTED" else "provider_rate_limit";break
-+                # One latest snapshot, then distinct preceding 24-hour windows.
-+                # The official date filter extends only to the 14-day retention.
-+                for window_index in range(SAMPLE_WINDOWS):
-+                    if halt or stats["inserted"]>=BATCH_SIZE:
-+                        break
-+                    self._check_budget(client)
-+                    if stats["checked"]>=SCAN_LIMIT:
-+                        reason="scan_limit";break
-+                    if not self._sample_slot(connection,client):
-+                        reason="sample_rate_limit";break
-                     try:
+-                    try:
 -                        self._check_cancelled(client)
 -                        refs=sample_refs(client.samples())
-+                        self._check_budget(client)
-+                        sample_calls+=1
-+                        date=iso(self.last_run_at-window_index*86400) if window_index else None
-+                        payload=client.samples(date) if date is not None else client.samples()
-+                        self._check_budget(client)
-+                        refs=sample_refs(payload)
-                     except AppError as exc:
-                         error=preferred_error(error,exc.code)
+-                    except AppError as exc:
+-                        error=preferred_error(error,exc.code)
 -                saved=connection.execute("SELECT value FROM collector_state WHERE key='cursor'").fetchone()
--                try:
++                fresh_due=sample_queue.process_due(connection)
++                fresh_admitted=(fresh_due is None or fresh_due<=self.clock()) and sample_queue.first_candidate(connection,self.clock()) is not None
++                if not halt and (due or fresh_admitted):
++                    processing=True
++                    with self.guard:self._phase="processing";self.last_run_at=began_clock
++                    names={name:config for config in self.config.list_maps() for name in config["telemetry_names"]}
++                    for row in due:
++                        self._check_budget(client);match_id=row["match_id"]
++                        processed.add(match_id);stats["checked"]+=1
++                        try:current=self._process_match(connection,client,match_id,names,stats)
++                        except _TrainingBlocked as blocked:
++                            error=preferred_error(error,blocked.code);training_blocked=True;reason="training_blocked";halt=True;break
++                        error=preferred_error(error,current)
++                        if current in ("PUBG_RATE_LIMITED","PUBG_AUTH_REJECTED"):
++                            halt=True;reason="provider_auth" if current=="PUBG_AUTH_REJECTED" else "provider_rate_limit";break
++                    while fresh_admitted and not halt and stats["inserted"]<BATCH_SIZE:
++                        fresh_started=True
++                        self._check_budget(client)
++                        if len(processed)>=SCAN_LIMIT:
++                            reason="scan_limit";break
++                        candidate=sample_queue.first_candidate(connection,self.clock())
++                        if candidate is None:
++                            reason="queue_empty";break
++                        match_id=candidate["match_id"]
++                        if not sample_queue.handoff(connection,match_id,self.clock()):
++                            continue
++                        processed.add(match_id);stats["checked"]+=1
++                        try:current=self._process_match(connection,client,match_id,names,stats)
++                        except _TrainingBlocked as blocked:
++                            error=preferred_error(error,blocked.code);training_blocked=True;reason="training_blocked";halt=True;break
++                        error=preferred_error(error,current)
++                        if current in ("PUBG_RATE_LIMITED","PUBG_AUTH_REJECTED"):
++                            halt=True;reason="provider_auth" if current=="PUBG_AUTH_REJECTED" else "provider_rate_limit";break
++                    if stats["inserted"]>=BATCH_SIZE and not training_blocked:
++                        reason="target_met"
++                    elif reason=="awaiting_samples":
++                        reason="queue_empty"
++                if not halt and not batch_cancel.is_set() and not self.stop_event.is_set() and self.monotonic()<self._batch_deadline:
++                    pending=pending_training(connection) or connection.execute("SELECT 1 FROM collector_state WHERE substr(key,1,?)=? LIMIT 1",(len(BACKFILL_PENDING_PREFIX),BACKFILL_PENDING_PREFIX)).fetchone()
++                    if processing or pending:
++                        if not processing:
++                            with self.guard:self._phase="quality"
++                        try:self._train_changed(connection,batch_cancel)
++                        except Cancelled:raise
++                        except Exception as exc:raise _TrainingBlocked(exc) from None
++            finally:
++                # Retain a separate fresh-queue cadence across discovery-only ticks and restarts.
+                 try:
 -                    offset=int(saved[0])%len(refs) if saved and refs else 0
 -                except ValueError:
 -                    offset=0
@@ -3818,13 +3969,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
 -                    stats["checked"]+=1;consumed+=1
 -                    if known:
 -                        stats["skipped"]+=1
-+                        reason=("provider_auth" if exc.code=="PUBG_AUTH_REJECTED" else
-+                                "provider_rate_limit" if exc.code=="PUBG_RATE_LIMITED" else "sample_error")
-+                        if exc.code in ("PUBG_AUTH_REJECTED","PUBG_RATE_LIMITED"):
-+                            break
-+                        if training_blocked:
-+                            reason="training_blocked";break
-                         continue
+-                        continue
 -                    new_candidates+=1
 -                    processed.add(match_id)
 -                    current=self._process_match(connection,client,match_id,names,stats)
@@ -3836,55 +3981,12 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
 -                connection.commit()
 -                if not batch_cancel.is_set() and not self.stop_event.is_set():
 -                    self._train_changed(connection,batch_cancel)
-+                    if training_blocked:
-+                        reason="training_blocked";break
-+                    known_refs=self._known_sample_refs(connection,client,refs)
-+                    cursor_key="cursor" if not window_index else "sample_cursor:"+str(window_index)
-+                    saved=connection.execute("SELECT value FROM collector_state WHERE key=?",(cursor_key,)).fetchone()
-+                    try:offset=int(saved[0])%len(refs) if saved and refs else 0
-+                    except ValueError:offset=0
-+                    consumed=0
-+                    for match_id in refs[offset:]+refs[:offset]:
-+                        if stats["inserted"]>=BATCH_SIZE:
-+                            reason="target_met";break
-+                        self._check_budget(client)
-+                        if stats["checked"]>=SCAN_LIMIT:
-+                            reason="scan_limit";halt=True;break
-+                        consumed+=1
-+                        if match_id in scanned:
-+                            continue
-+                        scanned.add(match_id);stats["checked"]+=1
-+                        if match_id in known_refs:
-+                            stats["skipped"]+=1;continue
-+                        row=connection.execute("SELECT * FROM collector_seen WHERE match_id=?",(match_id,)).fetchone()
-+                        reviewed=row and row["state"]=="excluded" and connection.execute(
-+                            "SELECT 1 FROM analyzer_seen WHERE match_id=?",(match_id,)).fetchone()
-+                        pending=row is None and connection.execute(
-+                            "SELECT 1 FROM collector_retry_meta WHERE match_id=?",(match_id,)).fetchone() is not None
-+                        if pending or row and (row["state"] in ("completed","failed") or reviewed):
-+                            stats["skipped"]+=1;continue
-+                        processed.add(match_id)
-+                        try:
-+                            current=self._process_match(connection,client,match_id,names,stats)
-+                        except _TrainingBlocked as blocked:
-+                            error=preferred_error(error,blocked.code);training_blocked=True;reason="training_blocked";halt=True;break
-+                        error=preferred_error(error,current)
-+                        if current in ("PUBG_RATE_LIMITED","PUBG_AUTH_REJECTED"):
-+                            reason="provider_auth" if current=="PUBG_AUTH_REJECTED" else "provider_rate_limit";halt=True;break
-+                    if refs:
-+                        connection.execute("INSERT OR REPLACE INTO collector_state(key,value) VALUES(?,?)",(cursor_key,str(offset+consumed)))
-+                        connection.commit()
-+                    if stats["inserted"]>=BATCH_SIZE and not training_blocked:
-+                        reason="target_met";break
-+                if not training_blocked and not batch_cancel.is_set() and not self.stop_event.is_set():
-+                    # A committed game's gate was already drained above. Do not
-+                    # start unrelated cache scans after the admission deadline.
-+                    if self.monotonic()<self._batch_deadline:
-+                        try:self._train_changed(connection,batch_cancel)
-+                        except Cancelled:raise
-+                        except Exception as exc:raise _TrainingBlocked(exc) from None
-             finally:
-                 connection.close()
+-            finally:
+-                connection.close()
++                    if fresh_started:
++                        sample_queue.set_process_due(connection,max(self.clock()+60,began_clock+INTERVAL_SECONDS))
++                finally:
++                    connection.close()
 +        except CollectionDeadline:
 +            reason="deadline"
          except Cancelled:
@@ -3907,15 +4009,23 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
 +                elapsed=max(0,self.monotonic()-began_monotonic)
 +                retry_after=getattr(client,"retry_after_seconds",0)
 +                retry_after=retry_after if timestamp(retry_after) is not None else 0
-+                if error=="PUBG_RATE_LIMITED" and retry_after:
-+                    self._remember_sample_backoff(min(86400,retry_after))
++                if error=="PUBG_RATE_LIMITED" and retry_after:self._remember_sample_backoff(min(86400,retry_after))
++                try:
++                    with database_connection(self.settings.database_path) as connection:
++                        desired=sample_queue.next_activity(connection,self.clock())
++                except Exception:
++                    desired=self.clock()+ERROR_RETRY_DELAYS[-1]
++                    error=preferred_error(error,"COLLECTOR_STATE_WRITE_FAILED")
                  with self.guard:
-                     self.client=None;self.running=False;self.last_result=stats
+-                    self.client=None;self.running=False;self.last_result=stats
 -                    # A cancelled old-Key request must not undo the new Key's
 -                    # immediate schedule or reintroduce its authentication error.
-+                    self.last_batch={"target":BATCH_SIZE,"inserted":stats["inserted"],"target_met":stats["inserted"]>=BATCH_SIZE,
-+                        "stop_reason":reason,"sample_calls":sample_calls,"attempted_matches":len(processed),
-+                        "elapsed_seconds":elapsed,"deadline_overrun":elapsed>BATCH_DEADLINE_SECONDS}
++                    self.client=None;self.running=False;self._phase="idle"
++                    if processing or self.last_batch is None:
++                        self.last_result=stats
++                        self.last_batch={"collection_policy":sample_queue.POLICY,"target":BATCH_SIZE,"inserted":stats["inserted"],"target_met":stats["inserted"]>=BATCH_SIZE,
++                            "stop_reason":reason,"sample_calls":sample_calls,"attempted_matches":len(processed),
++                            "elapsed_seconds":elapsed,"deadline_overrun":elapsed>BATCH_DEADLINE_SECONDS}
                      if generation==self._key_generation:
                          self.last_error_code=error
                          if error:
@@ -3926,36 +4036,19 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
 +                            if error=="PUBG_AUTH_REJECTED":delay=AUTH_BACKOFF_SECONDS
 +                            elif error=="PUBG_RATE_LIMITED":delay=max(delay,min(86400,retry_after))
                          else:
-                             self.failures=0;delay=INTERVAL_SECONDS
+-                            self.failures=0;delay=INTERVAL_SECONDS
 -                        # Nominal start-to-start cadence, with an overrun cooldown.
-                         began=self.last_run_at if self.last_run_at is not None else self.clock()
-                         self._scheduled_at=(self.clock()+delay if error else max(self.clock()+60,began+INTERVAL_SECONDS)) if self.settings.pubg_api_key else None
+-                        began=self.last_run_at if self.last_run_at is not None else self.clock()
+-                        self._scheduled_at=(self.clock()+delay if error else max(self.clock()+60,began+INTERVAL_SECONDS)) if self.settings.pubg_api_key else None
++                            self.failures=0;delay=60
++                        self._scheduled_at=max(desired,self.clock()+delay) if self.settings.pubg_api_key else None
                      self.next_run_at=self._scheduled_at if not self.stop_event.is_set() else None
                  self._persist_summary()
 +            self._batch_deadline=None
              self.batch_lock.release()
          return not cancelled and error is None
 +
-+    def _known_sample_refs(self,connection,client,refs):
-+        # Small indexed page snapshots remove thousands of per-ID lookups for
-+        # old samples. Potential new work still takes the immediate row checks
-+        # and the durable writer gate below; no prediction uses this snapshot.
-+        known=set()
-+        for start in range(0,len(refs),400):
-+            self._check_budget(client)
-+            page=refs[start:start+400]
-+            placeholders=",".join("(?)" for _ in page)
-+            rows=connection.execute("""WITH refs(match_id) AS (VALUES """+placeholders+""")
-+                SELECT refs.match_id FROM refs
-+                LEFT JOIN collector_seen s ON s.match_id=refs.match_id
-+                LEFT JOIN analyzer_seen a ON a.match_id=refs.match_id
-+                LEFT JOIN collector_retry_meta r ON r.match_id=refs.match_id
-+                WHERE s.state IN ('completed','failed') OR
-+                    (s.state='excluded' AND a.match_id IS NOT NULL) OR
-+                    (s.match_id IS NULL AND r.match_id IS NOT NULL)""",page).fetchall()
-+            known.update(row[0] for row in rows)
-+            self._check_budget(client)
-+        return known
++
 +
 +    def _check_budget(self,client):
 +        self._check_cancelled(client)
@@ -4008,7 +4101,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
  
      def _check_cancelled(self,client):
          client.check_cancelled()
-@@ -331,12 +517,14 @@
+@@ -331,12 +521,14 @@
  
      def _process_match(self,connection,client,match_id,names,stats):
          try:
@@ -4024,7 +4117,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
              data=metadata.get("data") if isinstance(metadata,dict) else None
              if not isinstance(data,dict) or not isinstance(data.get("id"),str) or not data["id"].strip():
                  raise AppError("PUBG_RESPONSE_INVALID","Official match data is incomplete",502)
-@@ -366,11 +554,13 @@
+@@ -366,11 +558,13 @@
              if not telemetry_url_allowed(url):
                  self._seen(connection,match_id,"excluded",code="TELEMETRY_ORIGIN_REJECTED")
                  connection.commit();stats["skipped"]+=1;return None
@@ -4039,7 +4132,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
              ended=not circles and any(isinstance(event,dict) and event.get("_T")=="LogMatchEnd" for event in events)
              del events,metadata,url
              if not circles:
-@@ -378,11 +568,55 @@
+@@ -378,11 +572,55 @@
                      raise AppError("PUBG_RESPONSE_INVALID","Official circle data is incomplete",502)
                  self._seen(connection,match_id,"excluded",code="NO_VALID_CIRCLES")
                  connection.commit();stats["skipped"]+=1;return None
@@ -4095,7 +4188,7 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
          except Cancelled:
              connection.rollback();raise
          except AppError as exc:
-@@ -462,18 +696,148 @@
+@@ -462,18 +700,152 @@
      def _train_changed(self, connection, cancel):
          if cancel.is_set() or self.stop_event.is_set():
              raise Cancelled()
@@ -4224,7 +4317,9 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
 +                    "prediction_mode":self.settings.prediction_mode,
 +                    "interval_minutes":INTERVAL_SECONDS//60,"batch_size":BATCH_SIZE,"next_run_at":iso(self.next_run_at),
                      "last_run_at":iso(self.last_run_at),"last_result":dict(self.last_result),"last_error_code":self.last_error_code}
-+            result.update(batch_target_kind="inserted",batch_deadline_seconds=BATCH_DEADLINE_SECONDS,
++            result.update(collection_policy=sample_queue.POLICY,
++                          phase="quality" if self._quality_running else self._phase if self.running else "idle",
++                          batch_target_kind="inserted",batch_deadline_seconds=BATCH_DEADLINE_SECONDS,
 +                          last_batch=dict(self.last_batch) if self.last_batch is not None else None)
 +            result["quality_evaluation"]={
 +                "state":("running" if self._quality_running else "idle" if not self._quality_pending else
@@ -4235,6 +4330,8 @@ diff --git a/app/zones/backend/app/services/collector.py b/app/zones/backend/app
          connection=connect_database(self.settings.database_path)
          try:
 +            connection.execute("BEGIN")
++            not_before=self.next_run_at if self.last_error_code in ("PUBG_AUTH_REJECTED","PUBG_RATE_LIMITED") else None
++            result["discovery"],result["queue"]=sample_queue.snapshot(connection,self.clock(),bool(self.settings.pubg_api_key),not_before)
              result["total_matches"]=connection.execute("SELECT COUNT(*) FROM matches m WHERE EXISTS(SELECT 1 FROM circle_phases c WHERE c.match_id=m.match_id)").fetchone()[0]
              result["total_circles"]=connection.execute("SELECT COUNT(*) FROM circle_phases").fetchone()[0]
 -            result["models"],result["supported_stages"]=model_summaries(connection,self.config,self.settings.model_dir)
@@ -5767,6 +5864,190 @@ new file mode 100644
 +        return result
 +    except (sqlite3.Error,OSError,ValueError,TypeError,KeyError):
 +        return {mode:_mode_base(map_id,mode,row,'evaluation_pending' if row is not None else 'no_model') for mode in _MODES}
+diff --git a/app/zones/backend/app/services/sample_queue.py b/app/zones/backend/app/services/sample_queue.py
+new file mode 100644
+--- /dev/null
++++ b/app/zones/backend/app/services/sample_queue.py
+@@ -0,0 +1,179 @@
++"""Durable sample discovery; queue records contain IDs and bounded times only."""
++from __future__ import annotations
++from datetime import datetime, UTC
++import hashlib
++import json
++from math import isfinite
++
++POLICY = 'daily-sample-queue-v1'
++INTERVAL_SECONDS = 3600
++HISTORY_WINDOWS = 13
++DISCOVERY_PAGES = 3
++DAY = 86400
++ANCHOR_KEY = 'sample_discovery_anchor_v1'
++PROCESS_DUE_KEY = 'queue_process_due_v1'
++
++
++def iso(value):
++    return datetime.fromtimestamp(value,UTC).isoformat() if value is not None else None
++
++
++def ensure_latest(connection, now):
++    connection.execute("INSERT OR IGNORE INTO collector_sample_sources(source_key,kind,state,next_check_at) VALUES('latest','latest','active',?)",(now,))
++    connection.commit()
++
++
++def next_source(connection, now):
++    connection.execute("UPDATE collector_sample_sources SET state='expired',next_check_at=NULL WHERE kind='history' AND state='pending' AND window_end+?<=?",(14*DAY,now))
++    connection.commit()
++    return connection.execute("""SELECT * FROM collector_sample_sources
++        WHERE state IN ('active','pending') AND next_check_at<=?
++        AND (kind='latest' OR window_end<=?)
++        ORDER BY CASE kind WHEN 'latest' THEN 0 ELSE 1 END,window_end,source_key LIMIT 1""",(now,now-DAY)).fetchone()
++
++
++def complete_source(connection, source, refs, now, check):
++    """Checkpoint and new IDs share one transaction; reorder is not a new list."""
++    digest=hashlib.sha256(json.dumps(sorted(refs),separators=(',',':')).encode()).hexdigest()
++    connection.execute('BEGIN IMMEDIATE')
++    try:
++        current=connection.execute('SELECT * FROM collector_sample_sources WHERE source_key=?',(source['source_key'],)).fetchone()
++        if current is None or current['state'] not in ('active','pending'):
++            connection.rollback();return
++        changed=current['fingerprint']!=digest
++        queued=0
++        expiry=min(now+13*DAY,(source['window_end']+14*DAY) if source['kind']=='history' else now+13*DAY)
++        if changed:
++            for offset in range(0,len(refs),400):
++                check();page=refs[offset:offset+400]
++                before=connection.total_changes
++                connection.execute("""WITH refs(match_id) AS (VALUES """+','.join('(?)' for _ in page)+""")
++                    INSERT OR IGNORE INTO collector_sample_queue(match_id,first_seen_at,expires_at,source_key)
++                    SELECT refs.match_id,?,?,? FROM refs
++                    LEFT JOIN collector_seen s ON s.match_id=refs.match_id
++                    LEFT JOIN analyzer_seen a ON a.match_id=refs.match_id
++                    LEFT JOIN collector_retry_meta r ON r.match_id=refs.match_id
++                    WHERE r.match_id IS NULL AND (s.match_id IS NULL OR
++                        (s.state='excluded' AND a.match_id IS NULL))""",(*page,now,expiry,source['source_key']))
++                queued+=connection.total_changes-before
++                # Reappearance can tighten retention, never extend its first observation.
++                connection.execute('UPDATE collector_sample_queue SET expires_at=? WHERE expires_at>? AND match_id IN ('+
++                    ','.join('?' for _ in page)+')',(expiry,expiry,*page))
++        if source['kind']=='latest':
++            if connection.execute('SELECT 1 FROM collector_state WHERE key=?',(ANCHOR_KEY,)).fetchone() is None:
++                connection.execute('INSERT INTO collector_state VALUES(?,?)',(ANCHOR_KEY,str(now)))
++                for index in range(1,HISTORY_WINDOWS+1):
++                    connection.execute("INSERT INTO collector_sample_sources(source_key,kind,window_end,state,next_check_at) VALUES(?,'history',?,'pending',?)",
++                                       ('history-'+str(index),now-index*DAY,now))
++            elif current['last_success_at'] is not None and now-current['last_success_at']>DAY:
++                # Only a real outage gap creates new fixed windows. Hourly
++                # probes never turn the fourteen-day history into a rolling scan.
++                for index in range(1,HISTORY_WINDOWS+1):
++                    end=now-index*DAY
++                    if end<=current['last_success_at']:
++                        break
++                    identity='gap-'+hashlib.sha256(repr(end).encode()).hexdigest()
++                    connection.execute("INSERT OR IGNORE INTO collector_sample_sources(source_key,kind,window_end,state,next_check_at) VALUES(?,'history',?,'pending',?)",
++                                       (identity,end,now))
++        check()
++        connection.execute("""UPDATE collector_sample_sources SET state=?,next_check_at=?,last_checked_at=?,last_success_at=?,
++            last_changed_at=CASE WHEN ? THEN ? ELSE last_changed_at END,fingerprint=?,received=?,queued=?,known=?,last_state=?,error_code=NULL,failures=0
++            WHERE source_key=?""",('active' if source['kind']=='latest' else 'done',now+INTERVAL_SECONDS if source['kind']=='latest' else None,
++                now,now,changed,now,digest,len(refs),queued,len(refs)-queued,'updated' if changed else 'unchanged',source['source_key']))
++        connection.commit()
++    except BaseException:
++        connection.rollback();raise
++
++
++def fail_source(connection, source, now, code, delay):
++    connection.execute("UPDATE collector_sample_sources SET last_checked_at=?,next_check_at=?,error_code=?,last_state='error',failures=MIN(255,failures+1) WHERE source_key=? AND state IN ('active','pending')",
++                       (now,now+delay,code,source['source_key']))
++    connection.commit()
++
++
++def process_due(connection):
++    row=connection.execute('SELECT value FROM collector_state WHERE key=?',(PROCESS_DUE_KEY,)).fetchone()
++    try:
++        value=float(row[0]) if row else None
++        return value if value is not None and isfinite(value) and value>=0 else None
++    except (ValueError,TypeError):return None
++
++
++def set_process_due(connection, value):
++    connection.execute('INSERT OR REPLACE INTO collector_state VALUES(?,?)',(PROCESS_DUE_KEY,str(value)))
++    connection.commit()
++
++
++def prune_queue(connection, now):
++    """Bookkeeping does not create games, circles or prospective score rows."""
++    connection.execute('BEGIN IMMEDIATE')
++    try:
++        expired=connection.execute('SELECT match_id FROM collector_sample_queue WHERE expires_at<=?',(now,)).fetchall()
++        for row in expired:
++            connection.execute("INSERT OR IGNORE INTO collector_seen VALUES(?,'excluded',1,0,'RETRY_EXPIRED',?)",(row[0],iso(now)))
++            connection.execute('INSERT OR IGNORE INTO analyzer_seen VALUES(?,?)',(row[0],iso(now)))
++        connection.execute('DELETE FROM collector_sample_queue WHERE expires_at<=? OR EXISTS(SELECT 1 FROM collector_retry_meta r WHERE r.match_id=collector_sample_queue.match_id) OR EXISTS(SELECT 1 FROM collector_seen s WHERE s.match_id=collector_sample_queue.match_id AND (s.state IN (\'completed\',\'failed\') OR (s.state=\'excluded\' AND EXISTS(SELECT 1 FROM analyzer_seen a WHERE a.match_id=s.match_id))))',(now,))
++        connection.commit();return len(expired)
++    except BaseException:
++        connection.rollback();raise
++
++
++def first_candidate(connection, now):
++    return connection.execute('SELECT * FROM collector_sample_queue WHERE expires_at>? ORDER BY expires_at,first_seen_at,match_id LIMIT 1',(now,)).fetchone()
++
++
++def handoff(connection, match_id, now):
++    """An interrupted first HTTP attempt becomes the original bounded retry work."""
++    connection.execute('BEGIN IMMEDIATE')
++    try:
++        row=connection.execute('SELECT * FROM collector_sample_queue WHERE match_id=?',(match_id,)).fetchone()
++        if row is None:
++            connection.rollback();return False
++        known=connection.execute("SELECT 1 FROM collector_retry_meta WHERE match_id=? UNION ALL SELECT 1 FROM collector_seen s WHERE match_id=? AND (state IN ('completed','failed') OR (state='excluded' AND EXISTS(SELECT 1 FROM analyzer_seen a WHERE a.match_id=s.match_id))) LIMIT 1",(match_id,match_id)).fetchone()
++        if row['expires_at']<=now or known:
++            if row['expires_at']<=now:
++                connection.execute("INSERT OR IGNORE INTO collector_seen VALUES(?,'excluded',1,0,'RETRY_EXPIRED',?)",(match_id,iso(now)))
++                connection.execute('INSERT OR IGNORE INTO analyzer_seen VALUES(?,?)',(match_id,iso(now)))
++            connection.execute('DELETE FROM collector_sample_queue WHERE match_id=?',(match_id,));connection.commit();return False
++        connection.execute('INSERT INTO collector_retry_meta VALUES(?,?,?)',(match_id,row['first_seen_at'],row['expires_at']))
++        connection.execute('DELETE FROM collector_sample_queue WHERE match_id=?',(match_id,))
++        connection.commit();return True
++    except BaseException:
++        connection.rollback();raise
++
++
++def next_retry(connection, now):
++    row=connection.execute("""SELECT MIN(CASE WHEN s.match_id IS NULL THEN r.first_seen_at ELSE s.retry_after END)
++        FROM collector_retry_meta r LEFT JOIN collector_seen s ON s.match_id=r.match_id
++        WHERE r.expires_at>? AND (s.match_id IS NULL OR s.state='failed')""",(now,)).fetchone()
++    return row[0]
++
++
++def next_activity(connection, now):
++    row=connection.execute("""SELECT MIN(CASE WHEN kind='history' THEN MAX(next_check_at,window_end+?) ELSE next_check_at END)
++        FROM collector_sample_sources WHERE state IN ('active','pending')""",(DAY,)).fetchone()
++    deadlines=[row[0]] if row[0] is not None else [now if connection.execute("SELECT 1 FROM collector_sample_sources WHERE source_key='latest'").fetchone() is None else now+INTERVAL_SECONDS]
++    if connection.execute('SELECT 1 FROM collector_sample_queue LIMIT 1').fetchone():
++        due=process_due(connection);deadlines.append(due if due is not None else now)
++    retry=next_retry(connection,now)
++    if retry is not None:deadlines.append(retry)
++    return min(deadlines)
++
++
++def snapshot(connection, now, enabled, not_before=None):
++    row=connection.execute("SELECT * FROM collector_sample_sources WHERE source_key='latest'").fetchone()
++    counts={entry['state']:entry['n'] for entry in connection.execute("SELECT state,COUNT(*) n FROM collector_sample_sources WHERE kind='history' GROUP BY state")}
++    history={'total':sum(counts.values()),'pending':counts.get('pending',0),'completed':counts.get('done',0),'expired':counts.get('expired',0)}
++    if connection.execute('SELECT 1 FROM collector_state WHERE key=?',(ANCHOR_KEY,)).fetchone() is None:history.update(total=HISTORY_WINDOWS,pending=HISTORY_WINDOWS)
++    next_row=connection.execute("SELECT MIN(CASE WHEN kind='history' THEN MAX(next_check_at,window_end+?) ELSE next_check_at END) FROM collector_sample_sources WHERE state IN ('active','pending')",(DAY,)).fetchone()
++    last_checked=connection.execute('SELECT MAX(last_checked_at) FROM collector_sample_sources').fetchone()[0]
++    def due(value):return iso(max(value,not_before)) if enabled and value is not None and not_before is not None else iso(value) if enabled else None
++    discovery={'interval_seconds':INTERVAL_SECONDS,'last_checked_at':iso(last_checked),
++        'latest_checked_at':iso(row['last_checked_at']) if row else None,'next_latest_check_at':due(row['next_check_at']) if row else None,
++        'last_changed_at':iso(row['last_changed_at']) if row else None,'next_check_at':due(next_row[0]),
++        'state':row['last_state'] if row else 'pending',
++        'last_result':{key:row[key] if row else 0 for key in ('received','queued','known')},'history':history}
++    retries=connection.execute("SELECT COUNT(*) FROM collector_retry_meta r LEFT JOIN collector_seen s ON s.match_id=r.match_id WHERE r.expires_at>? AND (s.match_id IS NULL OR s.state='failed')",(now,)).fetchone()[0]
++    queue={'pending':connection.execute('SELECT COUNT(*) FROM collector_sample_queue WHERE expires_at>?',(now,)).fetchone()[0],
++        'retrying':retries,'next_retry_at':due(next_retry(connection,now))}
++    return discovery,queue
 diff --git a/app/zones/backend/app/services/telemetry_parser.py b/app/zones/backend/app/services/telemetry_parser.py
 --- a/app/zones/backend/app/services/telemetry_parser.py
 +++ b/app/zones/backend/app/services/telemetry_parser.py
@@ -6401,7 +6682,7 @@ diff --git a/app/zones/web/index.html b/app/zones/web/index.html
 @@ -1,9 +1,18 @@
  <!doctype html>
 -<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=51aaa647d57f"><script defer src="/zones/settings.js?v=6b6d487fea36"></script></head>
-+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=c81b6ea1f593"><script defer src="/zones/settings.js?v=75b0328e9a28"></script></head>
++<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=c81b6ea1f593"><script defer src="/zones/settings.js?v=7d28f6082667"></script></head>
  <body><main>
 -<p id="connection" class="muted" role="status">正在读取圈型预测状态…</p>
 -<section><h1>Circle Analyzer / KNN</h1><label for="prediction-mode">对局模式</label><select id="prediction-mode" disabled><option value="auto">自动</option><option value="normal">普通匹配</option><option value="competitive">竞技排位</option></select><p id="mode-message" role="status"></p><p class="muted">自动模式无法区分圈型时，可手动选择实际对局模式。</p></section>
@@ -6417,7 +6698,7 @@ diff --git a/app/zones/web/index.html b/app/zones/web/index.html
 +<details id="settings-details" class="settings-panel"><summary id="settings-summary" tabindex="0">设置与详情</summary><div class="settings-body">
 +  <section class="settings-block"><h2>对局模式</h2><label for="prediction-mode">阶段识别模式</label><select id="prediction-mode" aria-describedby="mode-message mode-help" disabled><option value="auto">自动</option><option value="normal">普通匹配</option><option value="competitive">竞技排位</option></select><p id="mode-help" class="muted">模式用于识别圈阶段，不确定时保持自动。</p></section>
 +  <section class="settings-block"><h2>官方 API Key</h2><p id="configured" class="muted">正在读取…</p><form id="key-form" hidden><label for="api-key">新的 PUBG API Key</label><input id="api-key" type="password" autocomplete="new-password" placeholder="仅在需要配置或更换时填写" maxlength="4096" required><button id="save-key" type="submit">保存 API Key</button></form><p class="muted">保存后自动更新；密钥不会回显。</p></section>
-+  <section class="settings-block"><h2>任务详情</h2><dl><dt>训练诊断</dt><dd id="quality-state">—</dd><dt>采集计划</dt><dd id="interval">—</dd><dt>上次任务</dt><dd id="last-run">—</dd><dt>下次检查</dt><dd id="next-run">—</dd><dt>已收集比赛</dt><dd id="matches">—</dd><dt>圈型记录</dt><dd id="circles">—</dd></dl><p id="last-result" class="muted"></p></section>
++  <section class="settings-block"><h2>任务详情</h2><dl><dt>训练诊断</dt><dd id="quality-state">—</dd><dt>新样本检查</dt><dd id="discovery-interval">—</dd><dt>队列处理</dt><dd id="interval">—</dd><dt>待处理/待重试</dt><dd id="queue-counts">—</dd><dt>上次新样本检查</dt><dd id="discovery-last">—</dd><dt>下次发现</dt><dd id="discovery-next">—</dd><dt>历史回补</dt><dd id="discovery-history">—</dd><dt>上次处理</dt><dd id="last-run">—</dd><dt>下次任务</dt><dd id="next-run">—</dd><dt>已收集比赛</dt><dd id="matches">—</dd><dt>圈型记录</dt><dd id="circles">—</dd></dl><p id="discovery-result" class="muted"></p><p id="last-result" class="muted"></p></section>
 +</div></details>
 +<section class="map-panel" aria-labelledby="maps-title"><div class="section-heading"><h2 id="maps-title">地图数据</h2><span>平均重合度 · 最近20场</span></div><ul id="models"></ul>
 +  <details class="training-explanation"><summary tabindex="0">指标说明</summary><p class="muted">训练场次按最新训练统计。重合度先平均每场各阶段，再对最近最多20场等权平均，不按阶段数加权；缺预测按0计，缺目标不计。普通与竞技、下一圈与最终圈分别统计，仍使用原版共享模型。旧对局不回填，零场等待新对局；统计可跨模型，不代表下一局概率。</p></details>
@@ -6575,7 +6856,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
      if (!active || version !== writeEpoch || sequence < appliedRead) return null;
      const changed = result.prediction_mode !== predictionMode;
      applySettings(result); appliedRead = sequence;
-@@ -147,38 +200,190 @@
+@@ -147,38 +200,246 @@
        void resumeWhenReady();
      }
    }
@@ -6694,6 +6975,36 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
 +      modelCards.set(mapId, { signature: nextSignature, nodes });
 +    }
 +  }
++  function collectionView(status) {
++    if (status.collection_policy !== 'daily-sample-queue-v1') return null;
++    const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
++    const own = (value, key) => record(value) && Object.prototype.hasOwnProperty.call(value, key);
++    const number = (value, key) => own(value, key) && Number.isSafeInteger(value[key]) && value[key] >= 0 ? value[key] : null;
++    const discovery = record(status.discovery) ? status.discovery : null;
++    const queue = record(status.queue) ? status.queue : null;
++    const history = discovery && record(discovery.history) ? discovery.history : null;
++    const result = discovery && record(discovery.last_result) ? discovery.last_result : null;
++    const interval = number(discovery, 'interval_seconds');
++    const pending = number(queue, 'pending'), retrying = number(queue, 'retrying');
++    const total = number(history, 'total'), remaining = number(history, 'pending');
++    const completed = number(history, 'completed'), expired = number(history, 'expired');
++    const validHistory = total !== null && remaining !== null && completed !== null && expired !== null &&
++      remaining + completed + expired === total;
++    const received = number(result, 'received'), queued = number(result, 'queued'), known = number(result, 'known');
++    const validResult = received !== null && queued !== null && known !== null && queued + known <= received;
++    const state = discovery && ['pending', 'updated', 'unchanged', 'error'].includes(discovery.state) ? discovery.state : null;
++    const frequency = interval === null || interval <= 0 ? '检查周期待更新'
++      : interval % 3600 === 0 ? `约每 ${count(interval / 3600)} 小时检查新样本`
++      : interval % 60 === 0 ? `约每 ${count(interval / 60)} 分钟检查新样本` : `约每 ${count(interval)} 秒检查新样本`;
++    return { phase: ['idle', 'discovering', 'processing', 'quality'].includes(status.phase) ? status.phase : null,
++      discovery, state, frequency, pending, retrying, validHistory, remaining, completed, expired,
++      received, queued, known, validResult };
++  }
++  function detail(id, value) {
++    // New details remain optional for a page that retained the earlier HTML.
++    const element = byId(id);
++    if (element && element.textContent !== String(value)) element.textContent = value;
++  }
    function render(status) {
      text('configured', status.api_key_configured ? '已配置（不会回显）' : '尚未配置');
      const code = status.last_error_code;
@@ -6704,15 +7015,40 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
        : code ? '最近一次任务暂时失败，系统会按计划重试。' : '';
 -    text('collector-state', !status.api_key_configured ? '等待 API Key'
 -      : status.running ? '正在更新圈样本' : code === 'PUBG_AUTH_REJECTED' ? '认证被拒'
+-      : code === 'PUBG_RATE_LIMITED' ? '等待限流解除' : code ? '等待重试' : status.enabled ? '等待下次自动更新' : '等待自动任务');
+-    text('interval', `${count(status.interval_minutes)} 分钟 / 每批 ${count(status.batch_size)} 场`);
 +    const quality = status.quality_evaluation && typeof status.quality_evaluation === 'object' && !Array.isArray(status.quality_evaluation) ? status.quality_evaluation : null;
 +    const qualityState = quality && ['pending', 'running', 'error', 'idle'].includes(quality.state) ? quality.state : null;
-+    text('collector-state', status.running ? qualityState === 'running' ? '正在更新训练诊断' : status.api_key_configured ? '正在更新圈样本' : '正在处理现有任务'
++    const collection = collectionView(status);
++    const idleState = !collection ? status.enabled ? '等待下次自动更新' : '等待自动任务'
++      : collection.pending === null || collection.retrying === null ? '队列状态待更新'
++      : collection.pending > 0 ? '等待处理队列' : collection.retrying > 0 ? '等待失败重试'
++      : collection.state === 'error' ? '等待样本检查重试' : !collection.validHistory ? '采集状态待更新'
++      : collection.remaining > 0 ? '等待历史回补' : '等待新样本';
++    const runningState = qualityState === 'running' || collection && collection.phase === 'quality' ? '正在更新训练诊断'
++      : collection && collection.phase === 'discovering' ? '正在检查样本更新'
++      : collection && collection.phase === 'processing' ? '正在处理队列'
++      : status.api_key_configured ? '正在更新圈样本' : '正在处理现有任务';
++    text('collector-state', status.running ? runningState
 +      : !status.api_key_configured ? '等待 API Key' : code === 'PUBG_AUTH_REJECTED' ? '认证被拒'
-       : code === 'PUBG_RATE_LIMITED' ? '等待限流解除' : code ? '等待重试' : status.enabled ? '等待下次自动更新' : '等待自动任务');
--    text('interval', `${count(status.interval_minutes)} 分钟 / 每批 ${count(status.batch_size)} 场`);
++      : code === 'PUBG_RATE_LIMITED' ? '等待限流解除' : code ? '等待重试' : idleState);
 +    const effectiveBatch = status.batch_target_kind === 'inserted';
-+    text('interval', effectiveBatch ? `每 ${count(status.interval_minutes)} 分钟 / 目标 ${count(status.batch_size)} 场有效`
++    const processingPlan = `有待处理时每 ${count(status.interval_minutes)} 分钟 / 每批最多 ${count(status.batch_size)} 场有效`;
++    text('interval', collection ? `${byId('discovery-interval') ? '' : collection.frequency + '；'}${processingPlan}`
++      : effectiveBatch ? `每 ${count(status.interval_minutes)} 分钟 / 目标 ${count(status.batch_size)} 场有效`
 +      : `${count(status.interval_minutes)} 分钟 / 每批 ${count(status.batch_size)} 场`);
++    detail('discovery-interval', collection ? collection.frequency : '—');
++    detail('queue-counts', collection ? `待处理 ${count(collection.pending)} · 待重试 ${count(collection.retrying)}` : '—');
++    detail('discovery-last', collection && collection.discovery ? time(Object.prototype.hasOwnProperty.call(collection.discovery, 'latest_checked_at')
++      ? collection.discovery.latest_checked_at : collection.discovery.last_checked_at) : '—');
++    detail('discovery-next', collection && collection.discovery ? time(collection.discovery.next_check_at) : '—');
++    detail('discovery-history', collection && collection.validHistory
++      ? `已回补 ${count(collection.completed)} · 过期 ${count(collection.expired)} · 待补 ${count(collection.remaining)}` : '—');
++    detail('discovery-result', !collection ? '' : collection.state === 'pending' ? '尚未检查新样本。'
++      : collection.state === 'error' ? '最近新样本检查暂未成功，系统会按计划重试。'
++      : collection.validResult && (collection.state === 'updated' || collection.state === 'unchanged')
++        ? `${collection.state === 'unchanged' ? '列表未变化' : '列表已更新'} · 候选 ${count(collection.received)} · 新入队 ${count(collection.queued)} · 已知 ${count(collection.known)}`
++        : '样本发现状态待更新。');
      text('last-run', time(status.last_run_at)); text('next-run', time(status.next_run_at));
      text('matches', count(status.total_matches)); text('circles', count(status.total_circles));
      const result = status.last_result || {};
@@ -6725,13 +7061,15 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
 +    const stopReasons = { target_met: '已达目标', deadline: '本批时限已用尽', candidate_exhausted: '本轮候选不足',
 +      scan_limit: '本批检查上限已到', sample_rate_limit: '候选获取限流', provider_auth: '官方 API 认证被拒',
 +      provider_rate_limit: '官方 API 限流', sample_error: '候选获取失败', training_blocked: '训练待恢复',
-+      cancelled: '任务已停止', internal_error: '任务异常暂停' };
++      cancelled: '任务已停止', internal_error: '任务异常暂停', queue_empty: '本批队列已处理完', awaiting_samples: '等待新样本或重试到期' };
 +    const stop = validBatch && Object.prototype.hasOwnProperty.call(stopReasons, batch.stop_reason) &&
 +      (batch.stop_reason !== 'target_met' || batch.target_met) ? stopReasons[batch.stop_reason] : '';
 +    const deadline = Number.isSafeInteger(status.batch_deadline_seconds) && status.batch_deadline_seconds > 0 ? status.batch_deadline_seconds : null;
 +    const overrun = validBatch && batch.deadline_overrun === true && deadline !== null
 +      ? `本批耗时超过${deadline % 60 === 0 ? count(deadline / 60) + '分钟' : count(deadline) + '秒'}` : '';
-+    text('last-result', `${effectiveBatch && status.running ? '上次完成批次 · ' : ''}检查 ${count(result.checked)} · ${effectiveBatch ? '有效入库' : '新增'} ${count(result.inserted)} · 跳过 ${count(result.skipped)} · 失败 ${count(result.failed)}${stop ? ' · 停止：' + stop : ''}${overrun ? ' · ' + overrun : ''}`);
++    text('last-result', collection
++      ? `${status.running ? '上次完成处理' : '最近处理'} · 检查 ${count(result.checked)} · 有效入库 ${count(result.inserted)} · 跳过（含过期） ${count(result.skipped)} · 失败 ${count(result.failed)}${stop ? ' · 停止：' + stop : ''}${overrun ? ' · ' + overrun : ''}`
++      : `${effectiveBatch && status.running ? '上次完成批次 · ' : ''}检查 ${count(result.checked)} · ${effectiveBatch ? '有效入库' : '新增'} ${count(result.inserted)} · 跳过 ${count(result.skipped)} · 失败 ${count(result.failed)}${stop ? ' · 停止：' + stop : ''}${overrun ? ' · ' + overrun : ''}`);
      text('updated', new Date().toLocaleTimeString());
      text('task-error', problem);
 -    const models = byId('models'); models.replaceChildren();
@@ -6784,7 +7122,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
    }
    function drainRefresh() {
      if (refreshPending && active && authorized && initialized && !document.hidden && !refreshing && !saving &&
-@@ -189,16 +394,21 @@
+@@ -189,16 +450,21 @@
      if (refreshing) { if (afterWrite) refreshPending = true; return; }
      if (saving && !afterWrite) { refreshPending = true; return; }
      refreshPending = false; refreshing = true; clearTimeout(timer);
@@ -6811,7 +7149,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
    byId('key-form').addEventListener('submit', async event => {
      event.preventDefault();
      if (!authorized || saving) return;
-@@ -248,6 +458,7 @@
+@@ -248,6 +514,7 @@
      if (document.hidden) { resumePending = true; for (const controller of controllers) controller.abort(); }
      else requestResume();
    });
@@ -6819,7 +7157,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
    window.addEventListener('pagehide', () => {
      active = false; resumePending = true; clearTimeout(timer); clearTimeout(authTimer); clearTimeout(reconcileTimer);
      for (const controller of controllers) controller.abort();
-@@ -271,6 +482,7 @@
+@@ -271,6 +538,7 @@
    });
    async function initialize({recovery = false} = {}) {
      if (!active || document.hidden || initializing || initialized) return;
@@ -6827,7 +7165,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
      initializing = true; clearTimeout(timer);
      try {
        const session = await request('/session');
-@@ -284,6 +496,8 @@
+@@ -284,6 +552,8 @@
        initialized = true; initFailures = 0; authRequested = false; authAttempts = 0; clearTimeout(authTimer);
        if (firstSync) { initialSettingsSynced = true; notifySettingsChanged(); }
        byId('key-form').hidden = false; setSaving(saving);
@@ -6836,7 +7174,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
        if (pendingMode) {
          if (settings.prediction_mode === pendingMode.mode) {
            pendingMode = null; clearTimeout(reconcileTimer); text('mode-message', '已核对实际模式，保存已确认。');
-@@ -301,7 +515,7 @@
+@@ -301,7 +571,7 @@
        else if (++initFailures <= 5) {
          text('connection', '服务暂不可用，稍后自动重试。');
          timer = setTimeout(initialize, [1000, 3000, 10000, 30000, 30000][initFailures - 1]);
@@ -6845,7 +7183,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
      } finally {
        initializing = false;
        const pending = authCompletionPending; authCompletionPending = 0;
-@@ -310,5 +524,5 @@
+@@ -310,5 +580,5 @@
        drainRefresh();
      }
    }
