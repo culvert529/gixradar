@@ -25,6 +25,8 @@ COPY app/zones/backend/app/db/migrations/013_model_quality.sql /app/zones/backen
 COPY app/zones/backend/app/db/migrations/014_serving_quality.sql /app/zones/backend/app/db/migrations/014_serving_quality.sql
 COPY app/zones/backend/app/services/prequential.py /app/zones/backend/app/services/prequential.py
 COPY app/zones/backend/app/db/migrations/015_prequential_quality.sql /app/zones/backend/app/db/migrations/015_prequential_quality.sql
+COPY app/zones/backend/app/services/sample_queue.py /app/zones/backend/app/services/sample_queue.py
+COPY app/zones/backend/app/db/migrations/016_sample_queue.sql /app/zones/backend/app/db/migrations/016_sample_queue.sql
 COPY source-manifest.json /opt/gixradar-build.json
 
 ARG VERSION=analyzer
