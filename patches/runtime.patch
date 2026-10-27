@@ -5865,47 +5865,42 @@ diff --git a/app/zones/backend/app/services/training.py b/app/zones/backend/app/
 diff --git a/app/zones/web/index.html b/app/zones/web/index.html
 --- a/app/zones/web/index.html
 +++ b/app/zones/web/index.html
-@@ -1,9 +1,11 @@
--<!doctype html>
+@@ -1,9 +1,18 @@
+ <!doctype html>
 -<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=51aaa647d57f"><script defer src="/zones/settings.js?v=6b6d487fea36"></script></head>
--<body><main>
++<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=c81b6ea1f593"><script defer src="/zones/settings.js?v=38e9a34ffeb0"></script></head>
+ <body><main>
 -<p id="connection" class="muted" role="status">正在读取圈型预测状态…</p>
 -<section><h1>Circle Analyzer / KNN</h1><label for="prediction-mode">对局模式</label><select id="prediction-mode" disabled><option value="auto">自动</option><option value="normal">普通匹配</option><option value="competitive">竞技排位</option></select><p id="mode-message" role="status"></p><p class="muted">自动模式无法区分圈型时，可手动选择实际对局模式。</p></section>
 -<section><h2>官方 API Key</h2><p id="configured" class="muted">正在读取…</p><form id="key-form" hidden><label for="api-key">新的 PUBG API Key</label><input id="api-key" type="password" autocomplete="new-password" placeholder="仅在需要配置或更换时填写" maxlength="4096" required><button id="save-key" type="submit">保存 API Key</button><p id="message" role="status"></p></form><p class="muted">保存后自动更新圈样本；密钥不会回显。</p></section>
 -<section><h2>自动采集与样本更新</h2><dl><dt>当前状态</dt><dd id="collector-state">—</dd><dt>采集计划</dt><dd id="interval">—</dd><dt>上次任务</dt><dd id="last-run">—</dd><dt>下次检查</dt><dd id="next-run">—</dd><dt>已收集比赛</dt><dd id="matches">—</dd><dt>圈型记录</dt><dd id="circles">—</dd></dl><p id="last-result" class="muted"></p><p id="task-error" class="error" role="status"></p><p class="muted">状态更新于 <span id="updated">—</span></p></section>
 -<section><h2>可用 KNN 样本</h2><ul id="models"></ul><p class="notice">圈预测默认开启，按地图和对局模式使用 Circle Analyzer / KNN。各阶段至少需要 5 场独立比赛；样本不足时仅按可用校准估计，无法判断时暂不显示。圈样本数与独立比赛数分开统计，不代表预测准确率；实际圈型以游戏为准。</p></section>
--</main></body></html>
-+<!doctype html>
-+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=c8fcfbdd62e7"><script defer src="/zones/settings.js?v=062b9b14ad56"></script></head>
-+<body><main>
-+<p id="connection" class="muted" role="status">正在读取圈型预测状态…</p>
-+<button id="retry-connection" type="button" hidden>重新连接</button>
-+<a id="radar-login" href="/" target="_blank" rel="noopener" hidden>打开雷达登录（新标签页）</a>
-+<section><h1>Morse 圈型预测</h1><label for="prediction-mode">阶段识别模式</label><select id="prediction-mode" disabled><option value="auto">自动</option><option value="normal">普通匹配</option><option value="competitive">竞技排位</option></select><p id="mode-message" role="status"></p><p class="muted">模式用于识别当前圈阶段；原版统计模型按地图训练，普通与竞技共用。不能确认阶段时暂不叠加。</p></section>
-+<section><h2>官方 API Key</h2><p id="configured" class="muted">正在读取…</p><form id="key-form" hidden><label for="api-key">新的 PUBG API Key</label><input id="api-key" type="password" autocomplete="new-password" placeholder="仅在需要配置或更换时填写" maxlength="4096" required><button id="save-key" type="submit">保存 API Key</button><p id="message" role="status"></p></form><p class="muted">保存后自动更新圈样本；密钥不会回显。</p></section>
-+<section><h2>自动采集与样本更新</h2><dl><dt>当前状态</dt><dd id="collector-state">—</dd><dt>训练诊断</dt><dd id="quality-state">—</dd><dt>采集计划</dt><dd id="interval">—</dd><dt>上次任务</dt><dd id="last-run">—</dd><dt>下次检查</dt><dd id="next-run">—</dd><dt>已收集比赛</dt><dd id="matches">—</dd><dt>圈型记录</dt><dd id="circles">—</dd></dl><p id="last-result" class="muted"></p><p id="task-error" class="error" role="status"></p><p id="quality-error" class="error" role="status"></p><p class="muted">状态更新于 <span id="updated">—</span></p></section>
-+<section><h2>地图训练与平均重合度</h2><p class="muted">最近20场 · 先测后训。先平均每场各阶段，再对各场等权平均；空窗时等待新对局。</p><ul id="models"></ul><details class="training-explanation"><summary>如何计算平均重合度</summary><p class="muted">每场新采集的对局先用旧模型预测，再加入训练；普通匹配与竞技排位分开统计，仍共享原版训练模型。下一圈与最终圈各自计算：每阶段取预测圈与实际圈的面积交集÷并集（IoU），先对本场可评估阶段作算术平均，作为本场得分；再对最近最多20场的得分等权平均并乘100，不按阶段数加权。有实际目标但未能输出预测的阶段按IoU为0计，没有目标的阶段不计，没有可评估阶段的对局不进入窗口。窗口按采集顺序滚动，可以跨多个模型；旧的已训对局不会回填。1场起显示平均重合度和已测场数，零场等待新对局，不代表下一局成功概率。最新训练场次独立显示，预测继续按原版自动选模。</p></details></section>
-+</main></body></html>
++<section class="overview" aria-labelledby="page-title">
++  <header class="overview-head"><h1 id="page-title">圈型预测</h1><span id="collector-state" class="status-pill" role="status">正在读取…</span></header>
++  <div class="overview-meta"><p id="connection" class="muted" role="status">正在读取圈型预测状态…</p><p class="updated">更新于 <span id="updated">—</span></p></div>
++  <div class="connection-actions"><button id="retry-connection" type="button" hidden>重新连接</button><a id="radar-login" href="/" target="_blank" rel="noopener" hidden>打开雷达登录（新标签页）</a></div>
++  <p id="task-error" class="feedback error" role="status"></p><p id="quality-error" class="feedback error" role="status"></p><p id="message" class="feedback" role="status"></p><p id="mode-message" class="feedback" role="status"></p>
++</section>
++<details id="settings-details" class="settings-panel"><summary id="settings-summary" tabindex="0">设置与详情</summary><div class="settings-body">
++  <section class="settings-block"><h2>对局模式</h2><label for="prediction-mode">阶段识别模式</label><select id="prediction-mode" aria-describedby="mode-message mode-help" disabled><option value="auto">自动</option><option value="normal">普通匹配</option><option value="competitive">竞技排位</option></select><p id="mode-help" class="muted">模式用于识别圈阶段，不确定时保持自动。</p></section>
++  <section class="settings-block"><h2>官方 API Key</h2><p id="configured" class="muted">正在读取…</p><form id="key-form" hidden><label for="api-key">新的 PUBG API Key</label><input id="api-key" type="password" autocomplete="new-password" placeholder="仅在需要配置或更换时填写" maxlength="4096" required><button id="save-key" type="submit">保存 API Key</button></form><p class="muted">保存后自动更新；密钥不会回显。</p></section>
++  <section class="settings-block"><h2>任务详情</h2><dl><dt>训练诊断</dt><dd id="quality-state">—</dd><dt>采集计划</dt><dd id="interval">—</dd><dt>上次任务</dt><dd id="last-run">—</dd><dt>下次检查</dt><dd id="next-run">—</dd><dt>已收集比赛</dt><dd id="matches">—</dd><dt>圈型记录</dt><dd id="circles">—</dd></dl><p id="last-result" class="muted"></p></section>
++</div></details>
++<section class="map-panel" aria-labelledby="maps-title"><div class="section-heading"><h2 id="maps-title">地图数据</h2><span>平均重合度 · 最近20场</span></div><ul id="models"></ul>
++  <details class="training-explanation"><summary tabindex="0">指标说明</summary><p class="muted">训练场次按最新训练统计。重合度先平均每场各阶段，再对最近最多20场等权平均，不按阶段数加权；缺预测按0计，缺目标不计。普通与竞技、下一圈与最终圈分别统计，仍使用原版共享模型。旧对局不回填，零场等待新对局；统计可跨模型，不代表下一局概率。</p></details>
++</section>
+ </main></body></html>
 diff --git a/app/zones/web/settings.css b/app/zones/web/settings.css
 --- a/app/zones/web/settings.css
 +++ b/app/zones/web/settings.css
-@@ -1 +1,16 @@
- :root{color-scheme:dark;font:14px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif;background:#10131c;color:#e7ecf1}*{box-sizing:border-box}body{margin:0;padding:20px}main{max-width:560px;margin:auto}section{border:1px solid #2c3441;border-radius:10px;padding:16px;margin-bottom:16px;background:#151b26}h1{font-size:17px;margin:0 0 8px}h2{font-size:14px;margin:0 0 12px}p{margin:8px 0}.muted{color:#a4b0c1;font-size:12px}label{display:block;font-size:12px;color:#b9c5d5;margin-bottom:6px}input,select{width:100%;padding:10px 12px;border:1px solid #3a475c;border-radius:6px;background:#0d121b;color:#edf4ff;font:inherit}button{margin-top:10px;padding:8px 16px;border:1px solid #5f8db6;border-radius:6px;background:#25415a;color:#f2f7ff;font:inherit;cursor:pointer}button:disabled{opacity:.5;cursor:default}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid #91c8ef;outline-offset:2px}dl{display:grid;grid-template-columns:auto 1fr;gap:8px 16px;margin:0}dt{color:#a4b0c1}dd{margin:0;text-align:right;overflow-wrap:anywhere}ul{list-style:none;padding:0;margin:10px 0 0}li{display:flex;gap:12px;justify-content:space-between;padding:7px 0;border-top:1px solid #2a3342}.notice{color:#cfb786;font-size:12px}.error{color:#ffbaa9}#message,#mode-message{min-height:1.6em;font-size:12px}[hidden]{display:none!important}@media(max-width:420px){body{padding:12px}section{padding:12px}dl{gap:7px 10px}}
-+
-+#models{display:grid;grid-template-columns:minmax(0,1fr);gap:10px}
-+#models>li{display:grid;grid-template-columns:minmax(0,1fr);align-content:start;gap:7px;padding:12px;border:1px solid #2a3342;border-radius:8px;background:#101722}
-+.model-name{font-weight:600}.model-shared,.model-training,.model-validation{font-size:12px;color:#a4b0c1;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
-+.model-modes{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
-+.model-mode{min-width:0;border-top:1px solid #2a3342;padding-top:8px}.model-mode h3{font-size:13px;font-weight:500;margin:0}.model-training{margin:3px 0 7px}.model-history-title{font-size:11px;color:#a4b0c1;margin:0 0 5px}
-+.model-horizons{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.model-horizon{display:grid;gap:3px;align-content:start;min-width:0}.model-target{font-size:12px;color:#b4c1d2}.model-rate{font-size:16px;font-weight:500;color:#8ac7fa;font-variant-numeric:tabular-nums}.model-validation,.model-window{font-size:11px;line-height:1.5}.model-window{color:#a4b0c1;font-variant-numeric:tabular-nums}
-+#models progress{width:100%;height:6px;accent-color:#68b8f3;border:0;border-radius:4px;overflow:hidden;background:#283547}
-+#models progress::-webkit-progress-bar{background:#283547}
-+#models progress::-webkit-progress-value{background:#68b8f3}
-+#models progress::-moz-progress-bar{background:#68b8f3}
-+.training-explanation{margin-top:14px;font-size:12px}.training-explanation summary{color:#a4b0c1;cursor:pointer}.training-explanation summary:focus-visible{outline:2px solid #91c8ef;outline-offset:2px}
-+@media(max-width:420px){.model-modes{grid-template-columns:minmax(0,1fr);gap:10px}.model-horizons{gap:12px}}
-+#radar-login{display:inline-flex;align-items:center;min-height:44px;padding:8px 14px;margin:0 0 12px;border:1px solid #5f8db6;border-radius:6px;color:#b9defa;text-decoration:none}
-+#radar-login:focus-visible{outline:2px solid #91c8ef;outline-offset:2px}
+@@ -1 +1,6 @@
+-:root{color-scheme:dark;font:14px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif;background:#10131c;color:#e7ecf1}*{box-sizing:border-box}body{margin:0;padding:20px}main{max-width:560px;margin:auto}section{border:1px solid #2c3441;border-radius:10px;padding:16px;margin-bottom:16px;background:#151b26}h1{font-size:17px;margin:0 0 8px}h2{font-size:14px;margin:0 0 12px}p{margin:8px 0}.muted{color:#a4b0c1;font-size:12px}label{display:block;font-size:12px;color:#b9c5d5;margin-bottom:6px}input,select{width:100%;padding:10px 12px;border:1px solid #3a475c;border-radius:6px;background:#0d121b;color:#edf4ff;font:inherit}button{margin-top:10px;padding:8px 16px;border:1px solid #5f8db6;border-radius:6px;background:#25415a;color:#f2f7ff;font:inherit;cursor:pointer}button:disabled{opacity:.5;cursor:default}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid #91c8ef;outline-offset:2px}dl{display:grid;grid-template-columns:auto 1fr;gap:8px 16px;margin:0}dt{color:#a4b0c1}dd{margin:0;text-align:right;overflow-wrap:anywhere}ul{list-style:none;padding:0;margin:10px 0 0}li{display:flex;gap:12px;justify-content:space-between;padding:7px 0;border-top:1px solid #2a3342}.notice{color:#cfb786;font-size:12px}.error{color:#ffbaa9}#message,#mode-message{min-height:1.6em;font-size:12px}[hidden]{display:none!important}@media(max-width:420px){body{padding:12px}section{padding:12px}dl{gap:7px 10px}}
++/* Compact settings and independent per-map mean-IoU data. */
++:root{color-scheme:dark;font:14px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif;background:#0c111a;color:#e8edf5}*{box-sizing:border-box}body{margin:0;padding:16px}main{width:100%;max-width:720px;margin:auto;min-width:0}h1,h2,p{margin:0}h1{font-size:19px;font-weight:650;letter-spacing:.02em}h2{font-size:14px;font-weight:600}.muted,.updated{font-size:12px;color:#91a0b6}.overview,.settings-panel{border:1px solid #263246;border-radius:12px;background:#131b29}.overview{padding:16px;margin-bottom:10px}.overview-head,.overview-meta,.section-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}.overview-head{align-items:flex-start}.status-pill{max-width:60%;padding:4px 9px;border:1px solid #31546a;border-radius:7px;color:#a9d6e9;background:#142b38;font-size:12px;line-height:1.5;overflow-wrap:anywhere}.overview-meta{margin-top:9px;align-items:baseline;flex-wrap:wrap;gap:3px 12px}.overview-meta p{min-width:0;overflow-wrap:anywhere}.updated{font-size:11px;font-variant-numeric:tabular-nums}.connection-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}.connection-actions:empty{display:none}.feedback{font-size:12px;line-height:1.6;margin-top:9px;overflow-wrap:anywhere;color:#b8d8ef}.feedback:empty{display:none}.error{color:#ffb7a8}
++button,input,select,summary,a{touch-action:manipulation}button,input,select{font:inherit}button,select,input{min-height:44px}button{padding:9px 14px;border:1px solid #466d92;border-radius:8px;background:#203d58;color:#e6f0fb;cursor:pointer}button:disabled{opacity:.5;cursor:default}input,select{width:100%;min-width:0;padding:10px 12px;border:1px solid #33435a;border-radius:8px;background:#0c1320;color:#edf4ff}button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible,a:focus-visible{outline:2px solid #91c8ef;outline-offset:3px}#retry-connection,#radar-login{margin-top:10px}#radar-login{display:inline-flex;align-items:center;min-height:44px;padding:9px 12px;border:1px solid #466d92;border-radius:8px;color:#b9defa;text-decoration:none}[hidden]{display:none!important}
++.settings-panel{margin-bottom:16px;overflow:hidden}summary{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:44px;cursor:pointer;list-style:none}summary::-webkit-details-marker{display:none}summary::after{content:"+";font-size:18px;font-weight:400;line-height:1;color:#899db8}details[open]>summary::after{content:"−"}.settings-panel>summary{padding:11px 16px;font-size:13px;font-weight:550;color:#b8c6d8}.settings-panel[open]>summary{border-bottom:1px solid #263246}.settings-body{padding:0 16px}.settings-block{padding:16px 0}.settings-block+.settings-block{border-top:1px solid #263246}.settings-block h2{margin-bottom:10px}.settings-block label{display:block;font-size:12px;color:#b8c6d8;margin-bottom:6px}.settings-block .muted{margin-top:8px}.settings-block h2+.muted{margin-top:0;margin-bottom:9px}#save-key{margin-top:10px}dl{display:grid;grid-template-columns:auto minmax(0,1fr);gap:8px 16px;margin:0;font-size:12px}dt{color:#91a0b6}dd{margin:0;text-align:right;overflow-wrap:anywhere}
++.map-panel{min-width:0}.section-heading{margin:0 1px 10px;flex-wrap:wrap;gap:3px 12px}.section-heading>span{font-size:11px;color:#8292aa}#models{display:grid;grid-template-columns:minmax(0,1fr);gap:10px;list-style:none;padding:0;margin:0}#models>.model-card{min-width:0;padding:11px 12px 5px;border:1px solid #263246;border-radius:10px;background:#111a28}.model-name{display:block;padding:0 2px 8px;font-size:13px;font-weight:600;color:#dce8f7}.model-table{width:100%;max-width:100%;border-collapse:collapse;table-layout:fixed;font-variant-numeric:tabular-nums}.model-table th,.model-table td{padding:7px 3px;min-width:0;overflow-wrap:anywhere;vertical-align:middle;text-align:center}.model-columns th{padding-top:0;padding-bottom:7px;font-size:11px;font-weight:400;color:#7f91ab}.model-columns th:first-child{width:14%;text-align:left}.model-columns th:nth-child(2){width:22%}.model-columns th:nth-child(3),.model-columns th:nth-child(4){width:32%}.model-mode{border-top:1px solid #243145}.model-mode-name{text-align:left!important;font-size:12px;font-weight:400;color:#a5b5cc}.model-training{font-size:14px;color:#cad8ea}.model-rate{display:block;font-size:15px;font-weight:550;line-height:1.5;color:#a6cff0;overflow-wrap:anywhere}.model-rate[data-empty="true"]{font-size:14px;font-weight:400;color:#73859d}.model-validation{display:block;font-size:11px;line-height:1.5;color:#7f91aa}.training-explanation{margin:9px 1px 0}.training-explanation>summary{justify-content:flex-start;gap:8px;width:fit-content;padding:5px 1px;color:#8fa3be;font-size:12px}.training-explanation>summary::after{font-size:16px}.training-explanation p{padding:0 1px 7px;line-height:1.8}
++@media(min-width:680px){#models{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:420px){body{padding:12px}.overview{padding:14px}.settings-panel>summary{padding:11px 14px}.settings-body{padding:0 14px}.overview-head{gap:8px}.status-pill{font-size:11px}.overview-meta{gap:3px 8px}#models>.model-card{padding:10px 11px 4px}.model-table th,.model-table td{padding-left:2px;padding-right:2px}.model-rate{font-size:14px}dl{gap:7px 10px}}
 diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
 --- a/app/zones/web/settings.js
 +++ b/app/zones/web/settings.js
@@ -5927,7 +5922,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
    const modes = { auto: '自动', normal: '普通匹配', competitive: '竞技排位' };
    const text = (id, value) => { byId(id).textContent = value; };
    const count = value => Number.isSafeInteger(value) && value >= 0 ? value.toLocaleString() : '—';
-@@ -28,6 +32,36 @@
+@@ -28,6 +32,38 @@
        return await response.json();
      } finally { clearTimeout(timeout); controllers.delete(controller); }
    }
@@ -5948,7 +5943,8 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
 +    if (focused) {
 +      const mode = byId('prediction-mode'), key = byId('api-key');
 +      const target = !mode.disabled ? mode : !byId('key-form').hidden && !key.disabled ? key : null;
-+      if (target && typeof target.focus === 'function') { try { target.focus(); } catch (_) {} }
++      const details = byId('settings-details'), visibleTarget = details && !details.open ? byId('settings-summary') : target;
++      if (visibleTarget && typeof visibleTarget.focus === 'function') { try { visibleTarget.focus(); } catch (_) {} }
 +    }
 +    syncRetryControl();
 +  }
@@ -5957,14 +5953,15 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
 +    if (!loginLink.hidden && document.activeElement === loginLink) {
 +      const mode = byId('prediction-mode'), key = byId('api-key');
 +      const target = !mode.disabled ? mode : !byId('key-form').hidden && !key.disabled ? key : null;
-+      if (target && typeof target.focus === 'function') { try { target.focus(); } catch (_) {} }
++      const details = byId('settings-details'), visibleTarget = details && !details.open ? byId('settings-summary') : target;
++      if (visibleTarget && typeof visibleTarget.focus === 'function') { try { visibleTarget.focus(); } catch (_) {} }
 +    }
 +    loginLink.hidden = true;
 +  }
    function postParent(data) {
      if (!window.parent || window.parent === window || !window.location || typeof window.parent.postMessage !== 'function') return;
      window.parent.postMessage(data, window.location.origin);
-@@ -36,7 +70,7 @@
+@@ -36,7 +72,7 @@
      clearTimeout(authTimer);
      if (!active || document.hidden) return;
      if (!completionHint && authAttempts >= 5) {
@@ -5973,7 +5970,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
      }
      const requestId = authRequestId;
      authTimer = setTimeout(() => {
-@@ -51,7 +85,8 @@
+@@ -51,7 +87,8 @@
      authorized = false; initialized = false; clearTimeout(timer); clearTimeout(reconcileTimer); reconcileTimer = null;
      byId('key-form').hidden = true;
      byId('prediction-mode').disabled = true;
@@ -5983,7 +5980,16 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
      if (!authRequested) {
        authRequested = true; authReplySeen = false; authRequestId = authRequestId % 1000000 + 1;
        postParent({type: 'gixradar:session-request', version: 1, requestId: authRequestId});
-@@ -77,23 +112,27 @@
+@@ -63,6 +100,8 @@
+         !Object.prototype.hasOwnProperty.call(modes, settings.prediction_mode)) throw new Error('Invalid settings');
+     predictionMode = settings.prediction_mode; byId('prediction-mode').value = predictionMode;
+     text('configured', settings.pubg_api_key_configured ? '已配置（不会回显）' : '尚未配置');
++    const details = byId('settings-details');
++    if (details && !settings.pubg_api_key_configured) details.open = true;
+   }
+   function setSaving(value) {
+     saving = value; byId('save-key').disabled = value;
+@@ -77,23 +116,27 @@
    async function resumeWhenReady() {
      if (!resumePending || !active || document.hidden || resuming || initializing || refreshing || saving || reconciling) return;
      resumePending = false; resuming = true;
@@ -6014,7 +6020,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
        drainRefresh();
      }
    }
-@@ -102,7 +141,12 @@
+@@ -102,7 +145,12 @@
    }
    async function readSettings(version, notify = false) {
      const sequence = ++readSequence;
@@ -6028,7 +6034,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
      if (!active || version !== writeEpoch || sequence < appliedRead) return null;
      const changed = result.prediction_mode !== predictionMode;
      applySettings(result); appliedRead = sequence;
-@@ -147,14 +191,98 @@
+@@ -147,14 +195,101 @@
        void resumeWhenReady();
      }
    }
@@ -6036,13 +6042,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
 +    const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
 +    const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 +    const validCount = value => Number.isSafeInteger(value) && value >= 0;
-+    const selected = new Map(), training = new Map();
-+    for (const model of Array.isArray(status.models) ? status.models.slice(0, 18) : []) {
-+      if (!record(model) || !own(model, 'map_id') || typeof model.map_id !== 'string' || !own(mapNames, model.map_id) || selected.has(model.map_id) ||
-+          !own(model, 'match_type') || model.match_type !== 'mixed' || !own(model, 'model_run_id') ||
-+          typeof model.model_run_id !== 'string' || !model.model_run_id || model.model_run_id.length > 200) continue;
-+      selected.set(model.map_id, model);
-+    }
++    const training = new Map();
 +    for (const row of Array.isArray(status.training_maps) ? status.training_maps.slice(0, 18) : []) {
 +      if (record(row) && own(row, 'map_id') && typeof row.map_id === 'string' && own(mapNames, row.map_id) && !training.has(row.map_id)) training.set(row.map_id, row);
 +    }
@@ -6053,10 +6053,15 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
 +    };
 +    const list = byId('models'); list.replaceChildren();
 +    for (const [mapId, mapName] of Object.entries(mapNames)) {
-+      const model = selected.get(mapId), row = training.get(mapId);
++      const row = training.get(mapId);
 +      const item = node('li', 'model-card'); item.append(node('span', 'model-name', mapName));
-+      item.append(node('span', 'model-shared', model ? `预测模型 · 共享训练 ${count(own(model, 'training_match_count') ? model.training_match_count : undefined)} 场` : '暂无可用模型'));
-+      const groups = node('div', 'model-modes');
++      const table = node('table', 'model-table'), head = node('thead', ''), columns = node('tr', 'model-columns');
++      if (typeof table.setAttribute === 'function') table.setAttribute('aria-label', mapName + '训练场次和平均重合度');
++      for (const label of ['模式', '训练场次', '下一圈', '最终圈']) {
++        const column = node('th', '', label); column.scope = 'col'; columns.append(column);
++      }
++      head.append(columns); table.append(head);
++      const groups = node('tbody', 'model-modes');
 +      for (const matchType of ['normal', 'competitive']) {
 +        const candidate = row && own(row, 'modes') && record(row.modes) && own(row.modes, matchType) ? row.modes[matchType] : null;
 +        const metadata = record(candidate) &&
@@ -6065,16 +6070,20 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
 +          candidate.training_scope === 'mixed' &&
 +          ['native_holdout', 'post_training', 'unavailable'].includes(candidate.evaluation_kind) &&
 +          ['ready', 'insufficient_validation', 'pending', 'unavailable'].includes(candidate.quality_state);
-+        const group = node('div', 'model-mode model-mode-' + matchType);
-+        group.append(node('h3', '', modes[matchType]));
++        const group = node('tr', 'model-mode model-mode-' + matchType);
++        const modeName = node('th', 'model-mode-name', matchType === 'normal' ? '普通' : '竞技'); modeName.scope = 'row';
++        if (typeof modeName.setAttribute === 'function') modeName.setAttribute('aria-label', modes[matchType]);
++        group.append(modeName);
 +        const latest = metadata && own(candidate, 'latest_model_run_id') && own(candidate, 'latest_effective_training_matches') &&
 +          own(row, 'model_run_id') && candidate.latest_model_run_id === row.model_run_id &&
 +          (typeof candidate.latest_model_run_id === 'string' && candidate.latest_model_run_id.length > 0 && candidate.latest_model_run_id.length <= 200 ||
 +            candidate.latest_model_run_id === null && candidate.latest_effective_training_matches === 0);
-+        const source = !latest ? '最新训练待统计' : candidate.latest_effective_training_matches === null ? '最新训练来源未记录'
-+          : `最新训练 ${count(candidate.latest_effective_training_matches)} 场`;
-+        group.append(node('p', 'model-training', source));
-+        group.append(node('p', 'model-history-title', '平均重合度 · 最近20场 · 先测后训'));
++        const source = !latest ? '待统计' : candidate.latest_effective_training_matches === null ? '未记录'
++          : count(candidate.latest_effective_training_matches);
++        const sourceCell = node('td', 'model-training', source);
++        sourceCell.title = !latest ? '最新训练场次待统计' : candidate.latest_effective_training_matches === null ? '最新训练来源未记录'
++          : '最新训练 ' + count(candidate.latest_effective_training_matches) + ' 场';
++        group.append(sourceCell);
 +        const rolling = record(candidate) && own(candidate, 'rolling') && record(candidate.rolling) ? candidate.rolling : null;
 +        const rollingMetadata = rolling && ['policy', 'map_id', 'match_type', 'window_size', 'stage_score_rule',
 +          'match_score_rule', 'window_score_rule', 'order_policy', 'history_scope', 'epoch_started_at'].every(key => own(rolling, key)) &&
@@ -6083,7 +6092,6 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
 +          rolling.match_score_rule === 'arithmetic_mean_evaluable_stage_iou' && rolling.window_score_rule === 'equal_weight_mean_match_scores' && rolling.order_policy === 'persisted_arrival_sequence' &&
 +          rolling.history_scope === 'new_matches_since_epoch' && (rolling.epoch_started_at === null ||
 +            typeof rolling.epoch_started_at === 'string' && rolling.epoch_started_at.length <= 100 && Number.isFinite(new Date(rolling.epoch_started_at).getTime()));
-+        const horizons = node('div', 'model-horizons');
 +        for (const [kind, label] of [['next', '下一圈'], ['final', '最终圈']]) {
 +          const result = rollingMetadata && own(rolling, kind) && record(rolling[kind]) ? rolling[kind] : null;
 +          const valid = result && ['quality_state', 'evaluated_matches', 'total_match_score', 'mean_match_iou', 'confidence_percent'].every(key => own(result, key)) &&
@@ -6096,21 +6104,22 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
 +                Number.isFinite(result.confidence_percent) && result.confidence_percent >= 0 && result.confidence_percent <= 100 &&
 +                Math.abs(result.confidence_percent - 100 * result.total_match_score / result.evaluated_matches) <= 1e-7);
 +          const percent = valid && result.evaluated_matches > 0 ? result.confidence_percent : null;
-+          const circle = node('div', 'model-horizon model-horizon-' + kind);
-+          circle.append(node('span', 'model-target', label), node('strong', 'model-rate', !valid ? '评测待更新' : percent === null ? '等待新对局'
-+            : percent.toLocaleString(undefined, {maximumFractionDigits: 1}) + '%'));
-+          circle.append(node('small', 'model-validation', valid ? `已测 ${count(result.evaluated_matches)} 场` : '等待新评测数据'));
-+          circle.append(node('small', 'model-window', valid ? count(result.evaluated_matches) + '/20 场' : '不使用旧验证结果'));
-+          if (percent !== null) {
-+            const meter = node('progress', ''); meter.max = 100; meter.value = percent;
-+            if (typeof meter.setAttribute === 'function') meter.setAttribute('aria-label', mapName + modes[matchType] + label + '最近20场平均重合度');
-+            circle.append(meter);
++          const circle = node('td', 'model-horizon model-horizon-' + kind);
++          const display = !valid ? '评测待更新' : percent === null ? '等待新对局'
++            : percent.toLocaleString(undefined, {maximumFractionDigits: 1}) + '%';
++          const rate = node('strong', 'model-rate', percent === null ? '—' : display);
++          rate.title = label + display;
++          if (typeof rate.setAttribute === 'function') {
++            rate.setAttribute('aria-label', mapName + modes[matchType] + label + display);
++            rate.setAttribute('data-empty', String(percent === null));
 +          }
-+          horizons.append(circle);
++          circle.append(rate);
++          circle.append(node('small', 'model-validation', valid ? `已测 ${count(result.evaluated_matches)} 场` : '等待新评测数据'));
++          group.append(circle);
 +        }
-+        group.append(horizons); groups.append(group);
++        groups.append(group);
 +      }
-+      item.append(groups); list.append(item);
++      table.append(groups); item.append(table); list.append(item);
 +    }
 +  }
    function render(status) {
@@ -6130,7 +6139,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
        : code === 'PUBG_RATE_LIMITED' ? '等待限流解除' : code ? '等待重试' : status.enabled ? '等待下次自动更新' : '等待自动任务');
      text('interval', `${count(status.interval_minutes)} 分钟 / 每批 ${count(status.batch_size)} 场`);
      text('last-run', time(status.last_run_at)); text('next-run', time(status.next_run_at));
-@@ -163,22 +291,34 @@
+@@ -163,22 +298,34 @@
      text('last-result', `检查 ${count(result.checked)} · 新增 ${count(result.inserted)} · 跳过 ${count(result.skipped)} · 失败 ${count(result.failed)}`);
      text('updated', new Date().toLocaleTimeString());
      text('task-error', problem);
@@ -6178,7 +6187,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
    }
    function drainRefresh() {
      if (refreshPending && active && authorized && initialized && !document.hidden && !refreshing && !saving &&
-@@ -189,16 +329,21 @@
+@@ -189,16 +336,21 @@
      if (refreshing) { if (afterWrite) refreshPending = true; return; }
      if (saving && !afterWrite) { refreshPending = true; return; }
      refreshPending = false; refreshing = true; clearTimeout(timer);
@@ -6204,7 +6213,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
    byId('key-form').addEventListener('submit', async event => {
      event.preventDefault();
      if (!authorized || saving) return;
-@@ -248,6 +393,7 @@
+@@ -248,6 +400,7 @@
      if (document.hidden) { resumePending = true; for (const controller of controllers) controller.abort(); }
      else requestResume();
    });
@@ -6212,7 +6221,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
    window.addEventListener('pagehide', () => {
      active = false; resumePending = true; clearTimeout(timer); clearTimeout(authTimer); clearTimeout(reconcileTimer);
      for (const controller of controllers) controller.abort();
-@@ -271,6 +417,7 @@
+@@ -271,6 +424,7 @@
    });
    async function initialize({recovery = false} = {}) {
      if (!active || document.hidden || initializing || initialized) return;
@@ -6220,7 +6229,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
      initializing = true; clearTimeout(timer);
      try {
        const session = await request('/session');
-@@ -284,6 +431,8 @@
+@@ -284,6 +438,8 @@
        initialized = true; initFailures = 0; authRequested = false; authAttempts = 0; clearTimeout(authTimer);
        if (firstSync) { initialSettingsSynced = true; notifySettingsChanged(); }
        byId('key-form').hidden = false; setSaving(saving);
@@ -6229,7 +6238,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
        if (pendingMode) {
          if (settings.prediction_mode === pendingMode.mode) {
            pendingMode = null; clearTimeout(reconcileTimer); text('mode-message', '已核对实际模式，保存已确认。');
-@@ -301,7 +450,7 @@
+@@ -301,7 +457,7 @@
        else if (++initFailures <= 5) {
          text('connection', '服务暂不可用，稍后自动重试。');
          timer = setTimeout(initialize, [1000, 3000, 10000, 30000, 30000][initFailures - 1]);
@@ -6238,7 +6247,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
      } finally {
        initializing = false;
        const pending = authCompletionPending; authCompletionPending = 0;
-@@ -310,5 +459,5 @@
+@@ -310,5 +466,5 @@
        drainRefresh();
      }
    }
