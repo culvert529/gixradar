@@ -98,36 +98,36 @@ def clean_runtime(destination, release, root):
     added = set(after) - set(before)
     changed = {name for name in before.keys() & after.keys() if after[name] != before[name]}
     revision = release.get("runtime_revision", "cleanup1")
-    if revision not in {"cleanup1", "clock1", "profiles1", "settings1", "config1", "errors1", "accuracy1", "morse1", "morse3", "morse4", "morse6", "morse7", "morse8", "morse9"}:
+    if revision not in {"cleanup1", "clock1", "profiles1", "settings1", "config1", "errors1", "accuracy1", "morse1", "morse3", "morse4", "morse6", "morse7", "morse8", "morse9", "morse10"}:
         raise ValueError("Unsupported runtime revision")
     reviewed_changes = {"app/zones/backend/app/core/config.py"}
-    if revision in {"clock1", "profiles1", "settings1", "config1", "errors1", "accuracy1", "morse1", "morse3", "morse4", "morse6", "morse7", "morse8", "morse9"}:
+    if revision in {"clock1", "profiles1", "settings1", "config1", "errors1", "accuracy1", "morse1", "morse3", "morse4", "morse6", "morse7", "morse8", "morse9", "morse10"}:
         reviewed_changes |= {"app/build/static/js/gix-zones.js", "app/build/index.html"}
-    if revision in {"profiles1", "settings1", "config1", "errors1", "accuracy1", "morse1", "morse3", "morse4", "morse6", "morse7", "morse8", "morse9"}:
+    if revision in {"profiles1", "settings1", "config1", "errors1", "accuracy1", "morse1", "morse3", "morse4", "morse6", "morse7", "morse8", "morse9", "morse10"}:
         reviewed_changes |= {"app/zones/backend/app/services/analyzer.py", "app/zones/backend/app/services/training.py"}
-    if revision in {"settings1", "config1", "errors1", "accuracy1", "morse1", "morse3", "morse4", "morse6", "morse7", "morse8", "morse9"}:
+    if revision in {"settings1", "config1", "errors1", "accuracy1", "morse1", "morse3", "morse4", "morse6", "morse7", "morse8", "morse9", "morse10"}:
         reviewed_changes |= {"app/zones/web/settings.js", "app/zones/web/index.html"}
-    if revision in {"config1", "errors1", "accuracy1", "morse1", "morse3", "morse4", "morse6", "morse7", "morse8", "morse9"}:
+    if revision in {"config1", "errors1", "accuracy1", "morse1", "morse3", "morse4", "morse6", "morse7", "morse8", "morse9", "morse10"}:
         reviewed_changes |= {"app/zones/backend/app/services/config_service.py"}
-    if revision in {"errors1", "accuracy1", "morse1", "morse3", "morse4", "morse6", "morse7", "morse8", "morse9"}:
+    if revision in {"errors1", "accuracy1", "morse1", "morse3", "morse4", "morse6", "morse7", "morse8", "morse9", "morse10"}:
         reviewed_changes |= {"app/zones/backend/app/db/connection.py"}
-    if revision in {"accuracy1", "morse1", "morse3", "morse4", "morse6", "morse7", "morse8", "morse9"}:
+    if revision in {"accuracy1", "morse1", "morse3", "morse4", "morse6", "morse7", "morse8", "morse9", "morse10"}:
         reviewed_changes |= {"app/zones/backend/app/services/prediction.py"}
-    if revision in {"morse1", "morse3", "morse4", "morse6", "morse7", "morse8", "morse9"}:
+    if revision in {"morse1", "morse3", "morse4", "morse6", "morse7", "morse8", "morse9", "morse10"}:
         reviewed_changes |= {"app/zones/backend/app/main.py"}
-    if revision in {"morse3", "morse4", "morse6", "morse7", "morse8", "morse9"}:
+    if revision in {"morse3", "morse4", "morse6", "morse7", "morse8", "morse9", "morse10"}:
         reviewed_changes |= {"app/zones/web/settings.css"}
-    if revision in {"morse4", "morse6", "morse7", "morse8", "morse9"}:
+    if revision in {"morse4", "morse6", "morse7", "morse8", "morse9", "morse10"}:
         reviewed_changes |= {"app/build/static/css/gix-zones.css", "app/build/static/js/main.747f18dd.js"}
-    if revision in {"morse6", "morse7", "morse8", "morse9"}:
+    if revision in {"morse6", "morse7", "morse8", "morse9", "morse10"}:
         reviewed_changes |= {"app/zones/backend/app/services/collector.py", "app/zones/backend/app/services/pubg_api.py"}
-    reviewed_additions = MORSE_ADDITIONS if revision in {"morse1", "morse3", "morse4", "morse6", "morse7", "morse8", "morse9"} else frozenset()
-    if revision in {"morse7", "morse8", "morse9"}:
+    reviewed_additions = MORSE_ADDITIONS if revision in {"morse1", "morse3", "morse4", "morse6", "morse7", "morse8", "morse9", "morse10"} else frozenset()
+    if revision in {"morse7", "morse8", "morse9", "morse10"}:
         reviewed_additions |= QUALITY_ADDITIONS
-    if revision in {"morse8", "morse9"}:
+    if revision in {"morse8", "morse9", "morse10"}:
         reviewed_additions |= {"app/zones/backend/app/db/migrations/014_serving_quality.sql"}
         reviewed_changes |= {"app/zones/backend/app/services/telemetry_parser.py"}
-    if revision == "morse9":
+    if revision in {"morse9", "morse10"}:
         reviewed_additions |= {"app/zones/backend/app/services/prequential.py", "app/zones/backend/app/db/migrations/015_prequential_quality.sql"}
     if (removed != {"app/zones/backend/app/db/repository.py"} or added != reviewed_additions or
             changed != reviewed_changes):
@@ -135,7 +135,7 @@ def clean_runtime(destination, release, root):
     for key in ("files", "build_files"):
         manifest[key] = [after[entry["path"]] for entry in manifest[key] if entry["path"] in after]
         manifest[key].extend(after[name] for name in sorted(reviewed_additions))
-    app_count = 1012 if revision == "morse9" else (1010 if revision == "morse8" else (1009 if revision == "morse7" else (1007 if revision in {"morse1", "morse3", "morse4", "morse6"} else 996)))
+    app_count = 1012 if revision in {"morse9", "morse10"} else (1010 if revision == "morse8" else (1009 if revision == "morse7" else (1007 if revision in {"morse1", "morse3", "morse4", "morse6"} else 996)))
     if (sum(name.startswith("app/") for name in after) != app_count or
             len(manifest["files"]) != app_count + 5 or len(manifest["build_files"]) != app_count + 31 or
             len(after) != app_count + 31):
