@@ -228,12 +228,14 @@ def verify_http(client, manifest, mode, assets=False):
                          for value in row["modes"].values()) for row in training),
                  "FRESH_MODE_QUALITY_STATE")
         if manifest.get("runtime_revision") == "morse9":
-            need(all(value.get("rolling", {}).get("policy") == "prequential-circle-iou-v1" and
+            need(all(value.get("rolling", {}).get("policy") == "prequential-circle-iou-mean-v1" and
                      value["rolling"].get("window_size") == 20 and
-                     value["rolling"].get("iou_threshold") == .70 and
-                     value["rolling"].get("match_success_rule") == "all_evaluable_stages" and
+                     value["rolling"].get("stage_score_rule") == "circle_intersection_over_union" and
+                     value["rolling"].get("match_score_rule") == "arithmetic_mean_evaluable_stage_iou" and
+                     value["rolling"].get("window_score_rule") == "equal_weight_mean_match_scores" and
                      all(value["rolling"].get(kind, {}).get("evaluated_matches") == 0 and
-                         value["rolling"][kind].get("successful_matches") == 0 and
+                         value["rolling"][kind].get("total_match_score") == 0 and
+                         value["rolling"][kind].get("mean_match_iou") is None and
                          value["rolling"][kind].get("confidence_percent") is None and
                          value["rolling"][kind].get("quality_state") == "waiting_new_matches"
                          for kind in ("next", "final"))
@@ -382,10 +384,9 @@ from app.db.connection import connect_database
 from app.db.migrations import initialize_database
 from app.services.config_service import ConfigService
 from app.services.training import AnalyzerTrainer
-from app.services.prequential import score_match,rolling_quality,pending_training,acknowledge_training,circle_iou,iou_success
+from app.services.prequential import score_match,rolling_quality,pending_training,acknowledge_training,circle_iou
 from app.core.errors import AppError
 assert circle_iou(0,0,1,0,0,1)==1 and circle_iou(0,0,1,3,0,1)==0
-assert not iou_success(.70) and iou_success(.700001)
 radii=[192059.71875,105632.84375,63379.70703125,38027.82421875,24718.083984375,16066.75390625,10443.3896484375,6788.203125]
 with tempfile.TemporaryDirectory(prefix='gixradar-prospective-',dir='/data') as temporary:
  root=Path(temporary);database=root/'synthetic.sqlite3';models=root/'models'
@@ -404,36 +405,47 @@ with tempfile.TemporaryDirectory(prefix='gixradar-prospective-',dir='/data') as 
   assert rolling_quality(db,'taego','normal')['next']['evaluated_matches']==0
   db.execute('BEGIN IMMEDIATE')
   first=score_match(db,config,models,'fresh-a','taego','normal',circles())
-  assert first['status']=='scored' and first['next_success'] and first['final_success']
+  assert first['status']=='scored' and first['next_score']==1 and first['final_score']==1
   ingest('fresh-a',circles());db.commit()
+  # Different numbers of stages must not give the longer game more weight.
+  b_rows=[row for row in circles(50000) if row['phase'] in (1,2,8)]
+  expected_b_next=circle_iou(408000,408000,radii[1],458000,408000,radii[1])
   db.execute('BEGIN IMMEDIATE')
-  try:score_match(db,config,models,'fresh-b','taego','normal',circles(50000))
+  try:score_match(db,config,models,'fresh-b','taego','normal',b_rows)
   except AppError as error:assert error.code=='PREQUENTIAL_TRAINING_PENDING'
   else:raise AssertionError('Next score bypassed pending training')
   db.rollback()
   AnalyzerTrainer(db,config,models).sync('taego')
   db.execute('BEGIN IMMEDIATE');assert acknowledge_training(db,'taego',first['ledger_sequence']);db.commit()
   db.execute('BEGIN IMMEDIATE')
-  second=score_match(db,config,models,'fresh-b','taego','normal',circles(50000))
-  assert second['status']=='scored' and not second['next_success'] and not second['final_success']
-  ingest('fresh-b',circles(50000));db.commit()
+  second=score_match(db,config,models,'fresh-b','taego','normal',b_rows)
+  assert second['status']=='scored' and abs(second['next_score']-expected_b_next)<1e-9 and second['final_score']==.5
+  ingest('fresh-b',b_rows);db.commit()
   AnalyzerTrainer(db,config,models).sync('taego')
   db.execute('BEGIN IMMEDIATE');assert acknowledge_training(db,'taego',second['ledger_sequence']);db.commit()
-  db.execute('BEGIN IMMEDIATE');duplicate=score_match(db,config,models,'fresh-b','taego','normal',circles(50000));db.rollback()
+  db.execute('BEGIN IMMEDIATE');duplicate=score_match(db,config,models,'fresh-b','taego','normal',b_rows);db.rollback()
   assert duplicate['status']=='already_scored' and not pending_training(db)
   assert not db.execute("SELECT 1 FROM temp.sqlite_master WHERE name='model_runs'").fetchone()
   db.close();db=connect_database(database)
   result=rolling_quality(db,'taego','normal')
-  for kind in ('next','final'):
-   assert result[kind]['evaluated_matches']==2 and result[kind]['successful_matches']==1
-   assert result[kind]['confidence_percent']==50 and result[kind]['quality_state']=='partial_window'
+  for kind,score in (('next',expected_b_next),('final',.5)):
+   metric=result[kind]
+   assert metric['evaluated_matches']==2 and abs(metric['total_match_score']-(1+score))<1e-9
+   assert abs(metric['mean_match_iou']-(1+score)/2)<1e-9
+   assert abs(metric['confidence_percent']-100*(1+score)/2)<1e-7 and metric['quality_state']=='partial_window'
+  assert result['final']['confidence_percent']==75
+  assert abs(result['final']['confidence_percent']-100*8/9)>1
+  assert abs(result['next']['confidence_percent']-100*(7+expected_b_next)/8)>1
   assert db.execute('SELECT COUNT(*) FROM prequential_matches').fetchone()[0]==2
   receipts=db.execute('SELECT payload_json,payload_sha256 FROM prequential_matches ORDER BY sequence').fetchall()
   from app.services.analyzer import fingerprint
   assert all(fingerprint(json.loads(row['payload_json']))==row['payload_sha256'] for row in receipts)
   assert json.loads(receipts[0]['payload_json'])['frozen_pre_ingest']['model']['model_run_id']==initial
-  print(json.dumps({'passed':True,'prospectiveGames':2,'successesPerHorizon':1,'percentPerHorizon':50,
-   'strictThreshold':True,'pendingTrainingBarrier':True,'duplicateNotRecounted':True,'restartPersistence':True,'providerRequests':0}))
+  assert len(json.loads(receipts[0]['payload_json'])['cases']['next'])==7
+  assert len(json.loads(receipts[1]['payload_json'])['cases']['next'])==1
+  print(json.dumps({'passed':True,'prospectiveGames':2,'equalMatchWeights':True,
+   'nextMeanPercent':result['next']['confidence_percent'],'finalMeanPercent':75,
+   'pendingTrainingBarrier':True,'duplicateNotRecounted':True,'restartPersistence':True,'providerRequests':0}))
  finally:db.close()
 '''
 

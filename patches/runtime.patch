@@ -513,7 +513,7 @@ new file mode 100644
 +    started_at TEXT NOT NULL
 +);
 +INSERT OR IGNORE INTO prequential_epoch(id,policy,started_at)
-+VALUES(1,'prequential-circle-iou-v1',strftime('%Y-%m-%dT%H:%M:%fZ','now'));
++VALUES(1,'prequential-circle-iou-mean-v1',strftime('%Y-%m-%dT%H:%M:%fZ','now'));
 +CREATE TABLE IF NOT EXISTS prequential_exclusions (
 +    match_id TEXT PRIMARY KEY
 +);
@@ -531,14 +531,14 @@ new file mode 100644
 +    model_run_id TEXT,
 +    model_artifact_sha256 TEXT,
 +    next_case_count INTEGER NOT NULL CHECK(next_case_count>=0),
-+    next_pass INTEGER CHECK(next_pass IN (0,1)),
++    next_score REAL CHECK(next_score BETWEEN 0 AND 1),
 +    final_case_count INTEGER NOT NULL CHECK(final_case_count>=0),
-+    final_pass INTEGER CHECK(final_pass IN (0,1)),
++    final_score REAL CHECK(final_score BETWEEN 0 AND 1),
 +    payload_sha256 TEXT NOT NULL,
 +    payload_json TEXT NOT NULL,
 +    UNIQUE(policy,match_id),
-+    CHECK((next_case_count=0 AND next_pass IS NULL) OR (next_case_count>0 AND next_pass IS NOT NULL)),
-+    CHECK((final_case_count=0 AND final_pass IS NULL) OR (final_case_count>0 AND final_pass IS NOT NULL)),
++    CHECK((next_case_count=0 AND next_score IS NULL) OR (next_case_count>0 AND next_score IS NOT NULL)),
++    CHECK((final_case_count=0 AND final_score IS NULL) OR (final_case_count>0 AND final_score IS NOT NULL)),
 +    CHECK((model_run_id IS NULL AND model_artifact_sha256 IS NULL)
 +       OR (model_run_id IS NOT NULL AND model_artifact_sha256 IS NOT NULL))
 +);
@@ -4227,8 +4227,8 @@ diff --git a/app/zones/backend/app/services/prequential.py b/app/zones/backend/a
 new file mode 100644
 --- /dev/null
 +++ b/app/zones/backend/app/services/prequential.py
-@@ -0,0 +1,302 @@
-+"""Prospective test-before-train circle IoU receipts and rolling match verdicts.
+@@ -0,0 +1,309 @@
++"""Prospective test-before-train circle IoU receipts and equal-weight match means.
 +
 +This module never commits, fits, changes original ranking/math, or contacts an
 +external service. The collector owns one reserved writer transaction around
@@ -4238,7 +4238,7 @@ new file mode 100644
 +
 +from copy import deepcopy
 +from datetime import datetime, timezone
-+from math import acos, hypot, isfinite, pi, sqrt
++from math import acos, fsum, hypot, isfinite, pi, sqrt
 +from pathlib import Path
 +from uuid import uuid4
 +import json
@@ -4252,9 +4252,8 @@ new file mode 100644
 +    fingerprint,native_config)
 +from app.services.prediction import PredictionService
 +
-+POLICY = 'prequential-circle-iou-v1'
++POLICY = 'prequential-circle-iou-mean-v1'
 +WINDOW_SIZE = 20
-+IOU_THRESHOLD = 0.70
 +_MODES = ('normal','competitive')
 +_HORIZONS = ('next','final')
 +
@@ -4287,9 +4286,14 @@ new file mode 100644
 +    return max(0.0,min(1.0,intersection/union))
 +
 +
-+def iou_success(value):
-+    """Strict user rule: exact 0.70 fails. No rounding or tolerance relaxation."""
-+    return _finite(value) and value>IOU_THRESHOLD
++def mean_match_score(cases):
++    """One match/horizon: arithmetic mean of all evaluable stage IoUs."""
++    if not cases:
++        return None
++    values = [case['iou'] for case in cases]
++    if any(not _finite(value) or not 0<=value<=1 for value in values):
++        raise ValueError('Every evaluable stage needs an IoU in 0..1')
++    return fsum(values)/len(values)
 +
 +
 +def _timestamp(value,required=False):
@@ -4356,8 +4360,8 @@ new file mode 100644
 +def _summary(row,status):
 +    return {'status':status,'ledger_sequence':row['sequence'],'match_id':row['match_id'],
 +        'map_id':row['map_id'],'match_type':row['match_type'],
-+        'next_case_count':row['next_case_count'],'next_success':bool(row['next_pass']) if row['next_pass'] is not None else None,
-+        'final_case_count':row['final_case_count'],'final_success':bool(row['final_pass']) if row['final_pass'] is not None else None}
++        'next_case_count':row['next_case_count'],'next_score':row['next_score'],
++        'final_case_count':row['final_case_count'],'final_score':row['final_score']}
 +
 +
 +def _model_snapshot(connection,model_dir,map_id):
@@ -4427,17 +4431,16 @@ new file mode 100644
 +            raw = response.get(name+'_circle')
 +            predicted = _circle(raw,size)
 +            actual_phase = raw.get('phase') if isinstance(raw,dict) else None
-+            value = None
++            value = 0.0
 +            if predicted is not None:
 +                value = circle_iou(predicted['center_x'],predicted['center_y'],predicted['radius'],
 +                                   target['center_x'],target['center_y'],target['radius'])
-+            passed = predicted is not None and actual_phase==target_phase and iou_success(value)
 +            warnings = response.get('warnings',[])
 +            safe_warnings = [value for value in warnings if isinstance(value,str) and re.fullmatch(r'[A-Za-z0-9_:.-]{1,128}',value)]
 +            parameters = response.get('circle_parameters')
 +            result[name].append({'current_phase':phase,'target_phase':target_phase,'current_circle':current,
 +                'actual_circle':target,'predicted_circle':predicted,'predicted_phase':actual_phase if type(actual_phase) is int else None,
-+                'iou':value,'success':bool(passed),'missing_prediction':predicted is None,
++                'iou':value,'missing_prediction':predicted is None,
 +                'parameters':{key:parameters[key] for key in ('current_radius','next_radius','final_radius')
 +                    if isinstance(parameters,dict) and key in parameters and _finite(parameters[key])},
 +                'warnings':safe_warnings})
@@ -4478,19 +4481,20 @@ new file mode 100644
 +        truth = _truth(circles,size)
 +        frozen,predictions = _predict_all(connection,config,model_dir,map_id,mode,truth,cancel_check)
 +        cases = _score_cases(map_id,size,truth,predictions)
-+        verdicts = {name:all(value['success'] for value in cases[name]) if cases[name] else None for name in _HORIZONS}
++        match_scores = {name:mean_match_score(cases[name]) for name in _HORIZONS}
 +        payload = {'policy':POLICY,'match_id':match_id,'map_id':map_id,'match_type':mode,
 +            'game_created_at':_timestamp(game_created_at),'score_acquired_at':at,'epoch_started_at':epoch['started_at'],
-+            'iou_threshold':IOU_THRESHOLD,'threshold_comparison':'strict_gt','match_success_rule':'all_evaluable_stages',
-+            'frozen_pre_ingest':frozen,'cases':cases,'verdicts':verdicts}
++            'stage_score_rule':'circle_intersection_over_union',
++            'match_score_rule':'arithmetic_mean_evaluable_stage_iou','window_score_rule':'equal_weight_mean_match_scores',
++            'frozen_pre_ingest':frozen,'cases':cases,'match_scores':match_scores}
 +        _check(cancel_check)
 +        selected = frozen['model']
 +        cursor = connection.execute('INSERT INTO main.prequential_matches(policy,match_id,map_id,match_type,epoch_started_at,'+
-+            'game_created_at,score_acquired_at,model_run_id,model_artifact_sha256,next_case_count,next_pass,final_case_count,'+
-+            'final_pass,payload_sha256,payload_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
++            'game_created_at,score_acquired_at,model_run_id,model_artifact_sha256,next_case_count,next_score,final_case_count,'+
++            'final_score,payload_sha256,payload_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
 +            (POLICY,match_id,map_id,mode,epoch['started_at'],payload['game_created_at'],at,selected['model_run_id'],
-+             selected['artifact_sha256'],len(cases['next']),int(verdicts['next']) if verdicts['next'] is not None else None,
-+             len(cases['final']),int(verdicts['final']) if verdicts['final'] is not None else None,
++             selected['artifact_sha256'],len(cases['next']),match_scores['next'],
++             len(cases['final']),match_scores['final'],
 +             fingerprint(payload),json.dumps(payload,sort_keys=True,separators=(',',':'),allow_nan=False)))
 +        sequence = cursor.lastrowid
 +        connection.execute('INSERT INTO main.prequential_training_pending(map_id,ledger_sequence,match_id,created_at) VALUES(?,?,?,?)',
@@ -4509,24 +4513,27 @@ new file mode 100644
 +
 +
 +def rolling_quality(connection,map_id,mode):
-+    """Read per-horizon last 20 committed match verdicts, across model runs."""
++    """Read per-horizon last 20 committed match means, with equal game weights."""
 +    result = {'policy':POLICY,'map_id':map_id,'match_type':mode,'window_size':WINDOW_SIZE,
-+        'iou_threshold':IOU_THRESHOLD,'threshold_comparison':'strict_gt','match_success_rule':'all_evaluable_stages',
++        'stage_score_rule':'circle_intersection_over_union',
++        'match_score_rule':'arithmetic_mean_evaluable_stage_iou','window_score_rule':'equal_weight_mean_match_scores',
 +        'order_policy':'persisted_arrival_sequence','history_scope':'new_matches_since_epoch','epoch_started_at':None}
 +    for name in _HORIZONS:
-+        result[name] = {'quality_state':'waiting_new_matches','evaluated_matches':0,'successful_matches':0,'confidence_percent':None}
++        result[name] = {'quality_state':'waiting_new_matches','evaluated_matches':0,'total_match_score':0.0,
++            'mean_match_iou':None,'confidence_percent':None}
 +    try:
 +        epoch = connection.execute('SELECT policy,started_at FROM main.prequential_epoch WHERE id=1').fetchone()
 +        if epoch is None or epoch['policy']!=POLICY or mode not in _MODES:
 +            return result
 +        result['epoch_started_at'] = epoch['started_at']
 +        for name in _HORIZONS:
-+            rows = connection.execute('SELECT '+name+'_pass AS success FROM main.prequential_matches '+
++            rows = connection.execute('SELECT '+name+'_score AS score FROM main.prequential_matches '+
 +                'WHERE policy=? AND map_id=? AND match_type=? AND '+name+'_case_count>0 ORDER BY sequence DESC LIMIT ?',
 +                (POLICY,map_id,mode,WINDOW_SIZE)).fetchall()
-+            count,success = len(rows),sum(value['success'] for value in rows)
++            count,total = len(rows),fsum(value['score'] for value in rows)
 +            result[name] = {'quality_state':'full_window' if count==WINDOW_SIZE else 'partial_window' if count else 'waiting_new_matches',
-+                'evaluated_matches':count,'successful_matches':success,'confidence_percent':100.0*success/count if count else None}
++                'evaluated_matches':count,'total_match_score':total,'mean_match_iou':total/count if count else None,
++                'confidence_percent':100.0*(total/count) if count else None}
 +    except sqlite3.Error:
 +        pass
 +    return result
@@ -5869,7 +5876,7 @@ diff --git a/app/zones/web/index.html b/app/zones/web/index.html
 -<section><h2>可用 KNN 样本</h2><ul id="models"></ul><p class="notice">圈预测默认开启，按地图和对局模式使用 Circle Analyzer / KNN。各阶段至少需要 5 场独立比赛；样本不足时仅按可用校准估计，无法判断时暂不显示。圈样本数与独立比赛数分开统计，不代表预测准确率；实际圈型以游戏为准。</p></section>
 -</main></body></html>
 +<!doctype html>
-+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=c8fcfbdd62e7"><script defer src="/zones/settings.js?v=e7dd89e4f92c"></script></head>
++<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>圈型预测</title><link rel="stylesheet" href="/zones/settings.css?v=c8fcfbdd62e7"><script defer src="/zones/settings.js?v=062b9b14ad56"></script></head>
 +<body><main>
 +<p id="connection" class="muted" role="status">正在读取圈型预测状态…</p>
 +<button id="retry-connection" type="button" hidden>重新连接</button>
@@ -5877,7 +5884,7 @@ diff --git a/app/zones/web/index.html b/app/zones/web/index.html
 +<section><h1>Morse 圈型预测</h1><label for="prediction-mode">阶段识别模式</label><select id="prediction-mode" disabled><option value="auto">自动</option><option value="normal">普通匹配</option><option value="competitive">竞技排位</option></select><p id="mode-message" role="status"></p><p class="muted">模式用于识别当前圈阶段；原版统计模型按地图训练，普通与竞技共用。不能确认阶段时暂不叠加。</p></section>
 +<section><h2>官方 API Key</h2><p id="configured" class="muted">正在读取…</p><form id="key-form" hidden><label for="api-key">新的 PUBG API Key</label><input id="api-key" type="password" autocomplete="new-password" placeholder="仅在需要配置或更换时填写" maxlength="4096" required><button id="save-key" type="submit">保存 API Key</button><p id="message" role="status"></p></form><p class="muted">保存后自动更新圈样本；密钥不会回显。</p></section>
 +<section><h2>自动采集与样本更新</h2><dl><dt>当前状态</dt><dd id="collector-state">—</dd><dt>训练诊断</dt><dd id="quality-state">—</dd><dt>采集计划</dt><dd id="interval">—</dd><dt>上次任务</dt><dd id="last-run">—</dd><dt>下次检查</dt><dd id="next-run">—</dd><dt>已收集比赛</dt><dd id="matches">—</dd><dt>圈型记录</dt><dd id="circles">—</dd></dl><p id="last-result" class="muted"></p><p id="task-error" class="error" role="status"></p><p id="quality-error" class="error" role="status"></p><p class="muted">状态更新于 <span id="updated">—</span></p></section>
-+<section><h2>地图训练与滚动评测</h2><p class="muted">最近20场 · 先测后训。新指标从启用后的新对局开始累计；空窗时等待新对局。</p><ul id="models"></ul><details class="training-explanation"><summary>如何计算整场成功率</summary><p class="muted">每场新采集的对局先用旧模型预测，再加入训练；普通匹配与竞技排位分开统计，仍共享原版训练模型。下一圈与最终圈各取最近最多20场评测：所有可评估阶段的预测圈与实际圈面积重叠比（IoU，交集面积÷并集面积）都严格大于70%，整场才算成功；有实际目标但未能输出预测按失败计，没有目标的阶段不计。成功场次除以已测场次，不是逐阶段样本命中率。窗口按采集顺序滚动，可以跨多个模型；旧的已训对局不会回填。少于20场也显示当前比例和进度，零场等待新对局，不代表下一局成功概率。最新训练场次独立显示，预测继续按原版自动选模。</p></details></section>
++<section><h2>地图训练与平均重合度</h2><p class="muted">最近20场 · 先测后训。先平均每场各阶段，再对各场等权平均；空窗时等待新对局。</p><ul id="models"></ul><details class="training-explanation"><summary>如何计算平均重合度</summary><p class="muted">每场新采集的对局先用旧模型预测，再加入训练；普通匹配与竞技排位分开统计，仍共享原版训练模型。下一圈与最终圈各自计算：每阶段取预测圈与实际圈的面积交集÷并集（IoU），先对本场可评估阶段作算术平均，作为本场得分；再对最近最多20场的得分等权平均并乘100，不按阶段数加权。有实际目标但未能输出预测的阶段按IoU为0计，没有目标的阶段不计，没有可评估阶段的对局不进入窗口。窗口按采集顺序滚动，可以跨多个模型；旧的已训对局不会回填。1场起显示平均重合度和已测场数，零场等待新对局，不代表下一局成功概率。最新训练场次独立显示，预测继续按原版自动选模。</p></details></section>
 +</main></body></html>
 diff --git a/app/zones/web/settings.css b/app/zones/web/settings.css
 --- a/app/zones/web/settings.css
@@ -6021,7 +6028,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
      if (!active || version !== writeEpoch || sequence < appliedRead) return null;
      const changed = result.prediction_mode !== predictionMode;
      applySettings(result); appliedRead = sequence;
-@@ -147,14 +191,96 @@
+@@ -147,14 +191,98 @@
        void resumeWhenReady();
      }
    }
@@ -6067,34 +6074,36 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
 +        const source = !latest ? '最新训练待统计' : candidate.latest_effective_training_matches === null ? '最新训练来源未记录'
 +          : `最新训练 ${count(candidate.latest_effective_training_matches)} 场`;
 +        group.append(node('p', 'model-training', source));
-+        group.append(node('p', 'model-history-title', '最近20场 · 先测后训'));
++        group.append(node('p', 'model-history-title', '平均重合度 · 最近20场 · 先测后训'));
 +        const rolling = record(candidate) && own(candidate, 'rolling') && record(candidate.rolling) ? candidate.rolling : null;
-+        const rollingMetadata = rolling && ['policy', 'map_id', 'match_type', 'window_size', 'iou_threshold', 'threshold_comparison',
-+          'match_success_rule', 'order_policy', 'history_scope', 'epoch_started_at'].every(key => own(rolling, key)) &&
-+          rolling.policy === 'prequential-circle-iou-v1' && rolling.map_id === mapId && rolling.match_type === matchType &&
-+          rolling.window_size === 20 && rolling.iou_threshold === 0.70 && rolling.threshold_comparison === 'strict_gt' &&
-+          rolling.match_success_rule === 'all_evaluable_stages' && rolling.order_policy === 'persisted_arrival_sequence' &&
++        const rollingMetadata = rolling && ['policy', 'map_id', 'match_type', 'window_size', 'stage_score_rule',
++          'match_score_rule', 'window_score_rule', 'order_policy', 'history_scope', 'epoch_started_at'].every(key => own(rolling, key)) &&
++          rolling.policy === 'prequential-circle-iou-mean-v1' && rolling.map_id === mapId && rolling.match_type === matchType &&
++          rolling.window_size === 20 && rolling.stage_score_rule === 'circle_intersection_over_union' &&
++          rolling.match_score_rule === 'arithmetic_mean_evaluable_stage_iou' && rolling.window_score_rule === 'equal_weight_mean_match_scores' && rolling.order_policy === 'persisted_arrival_sequence' &&
 +          rolling.history_scope === 'new_matches_since_epoch' && (rolling.epoch_started_at === null ||
 +            typeof rolling.epoch_started_at === 'string' && rolling.epoch_started_at.length <= 100 && Number.isFinite(new Date(rolling.epoch_started_at).getTime()));
 +        const horizons = node('div', 'model-horizons');
 +        for (const [kind, label] of [['next', '下一圈'], ['final', '最终圈']]) {
 +          const result = rollingMetadata && own(rolling, kind) && record(rolling[kind]) ? rolling[kind] : null;
-+          const valid = result && ['quality_state', 'evaluated_matches', 'successful_matches', 'confidence_percent'].every(key => own(result, key)) &&
-+            validCount(result.evaluated_matches) && result.evaluated_matches <= 20 && validCount(result.successful_matches) &&
-+            result.successful_matches <= result.evaluated_matches && (result.evaluated_matches === 0
-+              ? result.quality_state === 'waiting_new_matches' && result.successful_matches === 0 && result.confidence_percent === null
++          const valid = result && ['quality_state', 'evaluated_matches', 'total_match_score', 'mean_match_iou', 'confidence_percent'].every(key => own(result, key)) &&
++            validCount(result.evaluated_matches) && result.evaluated_matches <= 20 && Number.isFinite(result.total_match_score) &&
++            result.total_match_score >= 0 && result.total_match_score <= result.evaluated_matches && (result.evaluated_matches === 0
++              ? result.quality_state === 'waiting_new_matches' && result.total_match_score === 0 && result.mean_match_iou === null && result.confidence_percent === null
 +              : rolling.epoch_started_at !== null && result.quality_state === (result.evaluated_matches === 20 ? 'full_window' : 'partial_window') &&
++                Number.isFinite(result.mean_match_iou) && result.mean_match_iou >= 0 && result.mean_match_iou <= 1 &&
++                Math.abs(result.mean_match_iou - result.total_match_score / result.evaluated_matches) <= 1e-9 &&
 +                Number.isFinite(result.confidence_percent) && result.confidence_percent >= 0 && result.confidence_percent <= 100 &&
-+                Math.abs(result.confidence_percent - 100 * result.successful_matches / result.evaluated_matches) <= 1e-7);
++                Math.abs(result.confidence_percent - 100 * result.total_match_score / result.evaluated_matches) <= 1e-7);
 +          const percent = valid && result.evaluated_matches > 0 ? result.confidence_percent : null;
 +          const circle = node('div', 'model-horizon model-horizon-' + kind);
 +          circle.append(node('span', 'model-target', label), node('strong', 'model-rate', !valid ? '评测待更新' : percent === null ? '等待新对局'
 +            : percent.toLocaleString(undefined, {maximumFractionDigits: 1}) + '%'));
-+          circle.append(node('small', 'model-validation', valid ? `成功 ${count(result.successful_matches)} / 已测 ${count(result.evaluated_matches)}` : '等待新评测数据'));
++          circle.append(node('small', 'model-validation', valid ? `已测 ${count(result.evaluated_matches)} 场` : '等待新评测数据'));
 +          circle.append(node('small', 'model-window', valid ? count(result.evaluated_matches) + '/20 场' : '不使用旧验证结果'));
 +          if (percent !== null) {
 +            const meter = node('progress', ''); meter.max = 100; meter.value = percent;
-+            if (typeof meter.setAttribute === 'function') meter.setAttribute('aria-label', mapName + modes[matchType] + label + '先测后训整场成功率');
++            if (typeof meter.setAttribute === 'function') meter.setAttribute('aria-label', mapName + modes[matchType] + label + '最近20场平均重合度');
 +            circle.append(meter);
 +          }
 +          horizons.append(circle);
@@ -6121,7 +6130,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
        : code === 'PUBG_RATE_LIMITED' ? '等待限流解除' : code ? '等待重试' : status.enabled ? '等待下次自动更新' : '等待自动任务');
      text('interval', `${count(status.interval_minutes)} 分钟 / 每批 ${count(status.batch_size)} 场`);
      text('last-run', time(status.last_run_at)); text('next-run', time(status.next_run_at));
-@@ -163,22 +289,34 @@
+@@ -163,22 +291,34 @@
      text('last-result', `检查 ${count(result.checked)} · 新增 ${count(result.inserted)} · 跳过 ${count(result.skipped)} · 失败 ${count(result.failed)}`);
      text('updated', new Date().toLocaleTimeString());
      text('task-error', problem);
@@ -6169,7 +6178,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
    }
    function drainRefresh() {
      if (refreshPending && active && authorized && initialized && !document.hidden && !refreshing && !saving &&
-@@ -189,16 +327,21 @@
+@@ -189,16 +329,21 @@
      if (refreshing) { if (afterWrite) refreshPending = true; return; }
      if (saving && !afterWrite) { refreshPending = true; return; }
      refreshPending = false; refreshing = true; clearTimeout(timer);
@@ -6195,7 +6204,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
    byId('key-form').addEventListener('submit', async event => {
      event.preventDefault();
      if (!authorized || saving) return;
-@@ -248,6 +391,7 @@
+@@ -248,6 +393,7 @@
      if (document.hidden) { resumePending = true; for (const controller of controllers) controller.abort(); }
      else requestResume();
    });
@@ -6203,7 +6212,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
    window.addEventListener('pagehide', () => {
      active = false; resumePending = true; clearTimeout(timer); clearTimeout(authTimer); clearTimeout(reconcileTimer);
      for (const controller of controllers) controller.abort();
-@@ -271,6 +415,7 @@
+@@ -271,6 +417,7 @@
    });
    async function initialize({recovery = false} = {}) {
      if (!active || document.hidden || initializing || initialized) return;
@@ -6211,7 +6220,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
      initializing = true; clearTimeout(timer);
      try {
        const session = await request('/session');
-@@ -284,6 +429,8 @@
+@@ -284,6 +431,8 @@
        initialized = true; initFailures = 0; authRequested = false; authAttempts = 0; clearTimeout(authTimer);
        if (firstSync) { initialSettingsSynced = true; notifySettingsChanged(); }
        byId('key-form').hidden = false; setSaving(saving);
@@ -6220,7 +6229,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
        if (pendingMode) {
          if (settings.prediction_mode === pendingMode.mode) {
            pendingMode = null; clearTimeout(reconcileTimer); text('mode-message', '已核对实际模式，保存已确认。');
-@@ -301,7 +448,7 @@
+@@ -301,7 +450,7 @@
        else if (++initFailures <= 5) {
          text('connection', '服务暂不可用，稍后自动重试。');
          timer = setTimeout(initialize, [1000, 3000, 10000, 30000, 30000][initFailures - 1]);
@@ -6229,7 +6238,7 @@ diff --git a/app/zones/web/settings.js b/app/zones/web/settings.js
      } finally {
        initializing = false;
        const pending = authCompletionPending; authCompletionPending = 0;
-@@ -310,5 +457,5 @@
+@@ -310,5 +459,5 @@
        drainRefresh();
      }
    }
